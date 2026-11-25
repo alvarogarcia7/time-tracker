@@ -1,0 +1,65 @@
+{
+  "date": "2026-11-11",
+  "parsed_at": "2026-11-11T12:00:00+04:00",
+  "original_text": "#toggl 11/11\n- [ ] 8 X\n- [ ] 859 watch tv, lost\n- [ ] -1:10 8\n- [ ] 1106 gym\n- [ ] \n",
+  "parser_version": "0.3.0",
+  "tag": "toggl",
+  "entries": [
+    {
+      "line": 2,
+      "source": "- [ ] 8 X",
+      "start": "08:00",
+      "end": "08:59",
+      "start_type": "absolute",
+      "time_expression": "8",
+      "duration_minutes": 59,
+      "description": "X",
+      "project": "unknown",
+      "reference": null,
+      "task": "X"
+    },
+    {
+      "line": 3,
+      "source": "- [ ] 859 watch tv, lost",
+      "start": "08:59",
+      "end": "09:56",
+      "start_type": "absolute",
+      "time_expression": "859",
+      "duration_minutes": 57,
+      "description": "watch tv, lost",
+      "project": "lost",
+      "reference": null,
+      "task": "watch tv"
+    },
+    {
+      "line": 4,
+      "source": "- [ ] -1:10 8",
+      "start": "09:56",
+      "end": "11:06",
+      "start_type": "relative",
+      "time_expression": "-1:10",
+      "duration_minutes": 70,
+      "description": "X",
+      "project": "unknown",
+      "reference": {
+        "start": "08:00",
+        "line": 2
+      },
+      "task": "X"
+    },
+    {
+      "line": 5,
+      "source": "- [ ] 1106 gym",
+      "start": "11:06",
+      "end": null,
+      "start_type": "absolute",
+      "time_expression": "1106",
+      "duration_minutes": null,
+      "description": "gym",
+      "project": "gym",
+      "reference": null,
+      "task": "gym"
+    }
+  ],
+  "schema": "schemas/time-entry-day-1.2.0-schema.json"
+}

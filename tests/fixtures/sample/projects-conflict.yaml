@@ -1,0 +1,6 @@
+# Rejected: "workout" is listed under two projects, and "Gym" repeats "gym".
+gym:
+  - workout
+  - Gym
+fitness:
+  - workout

@@ -1,0 +1,83 @@
+# Verifies the app on every push and pull request, deploys it to GitHub Pages from main, and then
+# runs the smoke tests against the deployed site. Nothing here needs a secret: the built-in token
+# is enough for Pages.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - name: Install the browsers for the end-to-end tests
+        run: npx playwright install --with-deps chromium webkit
+      - name: End-to-end tests (desktop Chromium, iPhone size in WebKit)
+        run: npx playwright test
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/configure-pages@v6
+        with:
+          enablement: true
+      - uses: actions/deploy-pages@v5
+        id: deployment
+
+  smoke:
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      E2E_BASE_URL: https://alvarogarcia7.github.io/time-tracker/
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium webkit
+      - name: Wait for the deployed site (up to 5 minutes)
+        run: |
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$E2E_BASE_URL")
+            echo "attempt $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 10
+          done
+          exit 1
+      - name: Smoke tests against the deployed site
+        run: npx playwright test --grep @smoke --retries 2

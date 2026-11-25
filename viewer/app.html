@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Time Parser</title>
+    <link rel="stylesheet" href="dist/app.css">
+</head>
+<body>
+<header class="app-bar">
+  <span class="brand">Time Parser</span>
+  <nav class="main-tabs" role="tablist" aria-label="sections">
+    <button type="button" role="tab" data-tab="editor" aria-selected="true">Editor</button>
+    <button type="button" role="tab" data-tab="viewer" aria-selected="false">Viewer</button>
+    <button type="button" role="tab" data-tab="reports" aria-selected="false">Reports</button>
+    <button type="button" role="tab" data-tab="projects" aria-selected="false">Projects</button>
+    <button type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+  </nav>
+</header>
+<div id="app-notice" class="app-notice hidden" role="status"></div>
+<main class="app-main">
+  <section id="panel-editor" class="panel-body" role="tabpanel" data-tab="editor"></section>
+  <section id="panel-viewer" class="panel-body hidden" role="tabpanel" data-tab="viewer"></section>
+  <section id="panel-reports" class="panel-body hidden" role="tabpanel" data-tab="reports"></section>
+  <section id="panel-projects" class="panel-body hidden" role="tabpanel" data-tab="projects"></section>
+  <section id="panel-settings" class="panel-body hidden" role="tabpanel" data-tab="settings"></section>
+</main>
+<script src="dist/app.js"></script>
+</body>
+</html>

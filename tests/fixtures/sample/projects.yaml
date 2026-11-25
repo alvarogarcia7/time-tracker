@@ -1,0 +1,13 @@
+# Keywords are matched as whole words, ignoring case.
+# A keyword may belong to one project only.
+lost:
+  - lost
+gym:
+  - gym
+  - workout
+client-a:
+  - client-a
+  - client-a team
+deep-work:
+  - focus
+  - writing

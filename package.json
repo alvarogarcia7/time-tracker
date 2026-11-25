@@ -1,0 +1,27 @@
+{
+  "name": "time-parser",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Parser for daily time-entry task lists, with reports, a viewer and a web editor",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build:viewer": "esbuild viewer/src/entry-server.ts --bundle --format=iife --target=es2020 --outfile=viewer/dist/app.js",
+    "build:cli": "esbuild src/bin.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/cli.js",
+    "build": "npm run build:cli && npm run build:viewer && npm run build:site",
+    "test:build": "esbuild tests/*.test.ts --bundle --platform=node --target=node20 --outdir=dist-test",
+    "test": "npm run test:build && node --test dist-test/*.test.js",
+    "build:site": "node scripts/build-site.mjs",
+    "build:icons": "node scripts/make-icons.mjs",
+    "serve:site": "node scripts/serve-site.mjs"
+  },
+  "dependencies": {
+    "parse5": "^7.3.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.9.3"
+  }
+}

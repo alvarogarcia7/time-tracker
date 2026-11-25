@@ -1,0 +1,71 @@
+{
+  "period": "daily",
+  "from": "2026-11-11",
+  "to": "2026-11-12",
+  "projects": [],
+  "prefixes": [],
+  "category": null,
+  "totals": {
+    "hours": 6.6,
+    "entries": 11,
+    "open_entries": 2,
+    "days": 2
+  },
+  "by_period": [
+    {
+      "period": "2026-11-11",
+      "hours": 3.1,
+      "entries": 4,
+      "open_entries": 1
+    },
+    {
+      "period": "2026-11-12",
+      "hours": 3.5,
+      "entries": 7,
+      "open_entries": 1
+    }
+  ],
+  "by_project": [
+    {
+      "project": "gym",
+      "category": "personal",
+      "hours": 1.5,
+      "entries": 3,
+      "open_entries": 1,
+      "share_percent": 22.7
+    },
+    {
+      "project": "client-a",
+      "category": "professional",
+      "hours": 1.0,
+      "entries": 2,
+      "open_entries": 0,
+      "share_percent": 15.2
+    },
+    {
+      "project": "deep-work",
+      "category": "professional",
+      "hours": 1.0,
+      "entries": 2,
+      "open_entries": 0,
+      "share_percent": 15.2
+    },
+    {
+      "project": "lost",
+      "category": "personal",
+      "hours": 0.95,
+      "entries": 1,
+      "open_entries": 0,
+      "share_percent": 14.4
+    },
+    {
+      "project": "unknown",
+      "category": null,
+      "hours": 2.15,
+      "entries": 3,
+      "open_entries": 1,
+      "share_percent": 32.6
+    }
+  ],
+  "skipped": []
+}

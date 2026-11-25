@@ -1,0 +1,107 @@
+{
+  "date": "2026-11-12",
+  "parsed_at": "2026-11-11T12:00:00+04:00",
+  "original_text": "#toggl 12/11\n- [ ] 0730 gym workout\n- [ ] 0830 0730\n- [ ] 0900 standup, client-a team\n- [ ] +45 0900\n- [ ] 1000 focus writing spec\n- [ ] -30 writing again\n- [ ] 1100 lunch\n- [ ] \n",
+  "parser_version": "0.3.0",
+  "tag": "toggl",
+  "entries": [
+    {
+      "line": 2,
+      "source": "- [ ] 0730 gym workout",
+      "start": "07:30",
+      "end": "08:30",
+      "start_type": "absolute",
+      "time_expression": "0730",
+      "duration_minutes": 60,
+      "description": "gym workout",
+      "project": "gym",
+      "reference": null,
+      "task": "gym workout"
+    },
+    {
+      "line": 3,
+      "source": "- [ ] 0830 0730",
+      "start": "08:30",
+      "end": "09:00",
+      "start_type": "absolute",
+      "time_expression": "0830",
+      "duration_minutes": 30,
+      "description": "gym workout",
+      "project": "gym",
+      "reference": {
+        "start": "07:30",
+        "line": 2
+      },
+      "task": "gym workout"
+    },
+    {
+      "line": 4,
+      "source": "- [ ] 0900 standup, client-a team",
+      "start": "09:00",
+      "end": "09:45",
+      "start_type": "absolute",
+      "time_expression": "0900",
+      "duration_minutes": 45,
+      "description": "standup, client-a team",
+      "project": "client-a",
+      "reference": null,
+      "task": "standup"
+    },
+    {
+      "line": 5,
+      "source": "- [ ] +45 0900",
+      "start": "09:45",
+      "end": "10:00",
+      "start_type": "relative",
+      "time_expression": "+45",
+      "duration_minutes": 15,
+      "description": "standup, client-a team",
+      "project": "client-a",
+      "reference": {
+        "start": "09:00",
+        "line": 4
+      },
+      "task": "standup"
+    },
+    {
+      "line": 6,
+      "source": "- [ ] 1000 focus writing spec",
+      "start": "10:00",
+      "end": "10:30",
+      "start_type": "absolute",
+      "time_expression": "1000",
+      "duration_minutes": 30,
+      "description": "focus writing spec",
+      "project": "deep-work",
+      "reference": null,
+      "task": "focus writing spec"
+    },
+    {
+      "line": 7,
+      "source": "- [ ] -30 writing again",
+      "start": "10:30",
+      "end": "11:00",
+      "start_type": "relative",
+      "time_expression": "-30",
+      "duration_minutes": 30,
+      "description": "writing again",
+      "project": "deep-work",
+      "reference": null,
+      "task": "writing again"
+    },
+    {
+      "line": 8,
+      "source": "- [ ] 1100 lunch",
+      "start": "11:00",
+      "end": null,
+      "start_type": "absolute",
+      "time_expression": "1100",
+      "duration_minutes": null,
+      "description": "lunch",
+      "project": "unknown",
+      "reference": null,
+      "task": "lunch"
+    }
+  ],
+  "schema": "schemas/time-entry-day-1.2.0-schema.json"
+}

@@ -1,0 +1,13 @@
+# Project database with categories. Keywords match whole words, ignoring case.
+lost:
+  category: personal
+  keywords: [lost]
+gym:
+  category: personal
+  keywords: [gym, workout]
+client-a:
+  category: professional
+  keywords: [client-a, "client-a team"]
+deep-work:
+  category: professional
+  keywords: [focus, writing]

@@ -30,12 +30,12 @@ describe("export bundle", () => {
 describe("import plan", () => {
   test("new files are added, identical ones are skipped", () => {
     const bundle = parseBundle(JSON.stringify(makeBundle([DAY], PROJECTS, NOW)));
-    const plan = planImport(bundle, new Map([[DAY.name, DAY.text]]), PROJECTS.text, NOW);
+    const plan = planImport(bundle, new Map([[DAY.name, DAY.text]]), new Map([[PROJECTS.name, PROJECTS.text]]), NOW);
     assert.deepEqual(plan, [
       { kind: "same", target: "day", name: DAY.name },
       { kind: "same", target: "database", name: "projects.yml" },
     ]);
-    const empty = planImport(bundle, new Map(), null, NOW);
+    const empty = planImport(bundle, new Map(), new Map(), NOW);
     assert.deepEqual(
       empty.map((action) => action.kind),
       ["add", "add"],
@@ -44,7 +44,12 @@ describe("import plan", () => {
 
   test("a file that differs is kept, and the imported text is added as a copy", () => {
     const bundle = parseBundle(JSON.stringify(makeBundle([DAY], PROJECTS, NOW)));
-    const plan = planImport(bundle, new Map([[DAY.name, "25/11/2026\n- [ ] 0800 other\n"]]), "lost: [lost]\n", NOW);
+    const plan = planImport(
+      bundle,
+      new Map([[DAY.name, "25/11/2026\n- [ ] 0800 other\n"]]),
+      new Map([[PROJECTS.name, "lost: [lost]\n"]]),
+      NOW,
+    );
     assert.deepEqual(plan[0], {
       kind: "conflict",
       target: "day",
@@ -59,6 +64,32 @@ describe("import plan", () => {
       copy: "projects.conflict-20261125-101500.yml",
       text: PROJECTS.text,
     });
+  });
+
+  test("a conflict copy of the project database is part of the export and comes back on import", () => {
+    const copy = { name: "projects.conflict-20261125-101500.yml", text: "lost: [lost]\n", updated: NOW.toISOString() };
+    const exported = makeBundle([DAY], PROJECTS, NOW, [copy]);
+    const again = parseBundle(JSON.stringify(exported));
+    assert.deepEqual(again.projectCopies, [copy]);
+    const plan = planImport(again, new Map(), new Map(), NOW);
+    assert.deepEqual(
+      plan.filter((action) => action.target === "database").map((action) => [action.kind, action.name]),
+      [
+        ["add", "projects.yml"],
+        ["add", "projects.conflict-20261125-101500.yml"],
+      ],
+    );
+  });
+
+  test("a copy in an import that differs from this device's copy is kept as a copy again", () => {
+    const copy = { name: "projects.conflict-20261125-101500.yml", text: "gym: [gym]\n", updated: NOW.toISOString() };
+    const bundle = parseBundle(JSON.stringify(makeBundle([], null, NOW, [copy])));
+    const plan = planImport(bundle, new Map(), new Map([[copy.name, "lost: [lost]\n"]]), NOW);
+    assert.equal(plan[0].kind, "conflict");
+    if (plan[0].kind !== "conflict") throw new Error("unreachable");
+    assert.equal(plan[0].target, "database");
+    assert.notEqual(plan[0].copy, copy.name);
+    assert.match(plan[0].copy, /\.conflict-.*\.yml$/);
   });
 
   test("copy names do not collide with files already there", () => {

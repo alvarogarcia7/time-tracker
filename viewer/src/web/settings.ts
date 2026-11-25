@@ -5,7 +5,7 @@ import { fileStamp } from "@core/hash";
 import type { Controller, Shell } from "../shell";
 import type { SettingsMount } from "../app";
 import { DATABASE_NAME, DEFAULT_DATABASE, IdbStore } from "./idb";
-import { DEFAULT_REPO, loadSettings, runSync, showNotice } from "./host";
+import { DEFAULT_REPO, loadSettings, showNotice, syncNow } from "./host";
 
 const TEMPLATE = `
 <h2 class="panel-title">Sync</h2>
@@ -29,6 +29,16 @@ const TEMPLATE = `
     <button id="set-forget" type="button" class="button">Forget token</button>
   </div>
   <p id="set-status" class="small" role="status"></p>
+</section>
+
+<h2 class="panel-title">Project database copies</h2>
+<section class="card">
+  <p class="muted small">
+    When an import differs from the project database on this device, the imported text is kept here as a copy.
+    Move what you need into the Projects tab, then delete the copy.
+  </p>
+  <ul id="copies-list" class="share-list" aria-label="project database copies"></ul>
+  <p id="copies-empty" class="muted small">No copies.</p>
 </section>
 
 <h2 class="panel-title">Backup</h2>
@@ -72,8 +82,37 @@ export function mountSettings(store: IdbStore): SettingsMount {
     const repoInput = byId<HTMLInputElement>("set-repo");
     const tokenInput = byId<HTMLInputElement>("set-token");
     const deviceInput = byId<HTMLInputElement>("set-device");
+    const copiesList = byId<HTMLElement>("copies-list");
+    const copiesEmpty = byId<HTMLElement>("copies-empty");
     let exported: Blob | null = null;
     let exportName = "";
+
+    // The database copies, each with a delete button.
+    const renderCopies = async () => {
+      const { copies } = await store.exportRows();
+      copiesList.replaceChildren();
+      for (const copy of copies) {
+        const item = document.createElement("li");
+        item.className = "copy-row";
+        const name = document.createElement("span");
+        name.className = "share-name-text";
+        name.textContent = copy.name;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "button";
+        remove.textContent = "Delete";
+        remove.setAttribute("aria-label", `Delete ${copy.name}`);
+        remove.addEventListener("click", async () => {
+          if (!window.confirm(`Delete ${copy.name}? Its text is not in projects.yml.`)) return;
+          await store.deleteDatabaseCopy(copy.name);
+          await renderCopies();
+          say(backupStatus, `Deleted ${copy.name}.`);
+        });
+        item.append(name, remove);
+        copiesList.append(item);
+      }
+      copiesEmpty.classList.toggle("hidden", copies.length > 0);
+    };
 
     const say = (node: HTMLElement, message: string, isError = false) => {
       node.textContent = message;
@@ -103,7 +142,7 @@ export function mountSettings(store: IdbStore): SettingsMount {
 
     byId<HTMLButtonElement>("set-sync").addEventListener("click", async () => {
       say(status, "Syncing...");
-      const result = await runSync(store, shell);
+      const result = await syncNow(store, shell);
       say(status, result.message, result.isError);
     });
 
@@ -115,19 +154,20 @@ export function mountSettings(store: IdbStore): SettingsMount {
 
     // ---- export ----------------------------------------------------------------------
     const prepareExport = async () => {
-      const { days, projects } = await store.exportRows();
+      const { days, projects, copies } = await store.exportRows();
       const toFile = (row: { name: string; text: string; updated: string }): BundleFile => ({
         name: row.name,
         text: row.text,
         updated: row.updated,
       });
       const now = new Date();
-      const bundle = makeBundle(days.map(toFile), projects ? toFile(projects) : null, now);
+      const bundle = makeBundle(days.map(toFile), projects ? toFile(projects) : null, now, copies.map(toFile));
       exportName = `time-parser-export-${fileStamp(now)}.json`;
       exported = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
       const list = byId<HTMLElement>("export-files");
       list.replaceChildren();
-      for (const row of [...days, ...(projects ? [projects] : [])]) {
+      const rows = [...days, ...(projects ? [projects] : []), ...copies];
+      for (const row of rows) {
         const link = document.createElement("a");
         link.className = "served-file";
         link.textContent = row.name;
@@ -139,7 +179,7 @@ export function mountSettings(store: IdbStore): SettingsMount {
         "hidden",
         !navigator.canShare?.({ files: [new File([exported], exportName, { type: "application/json" })] }),
       );
-      return { count: days.length + (projects ? 1 : 0) };
+      return { count: rows.length };
     };
 
     byId<HTMLButtonElement>("export-all").addEventListener("click", async () => {
@@ -167,47 +207,55 @@ export function mountSettings(store: IdbStore): SettingsMount {
       if (!file) return;
       try {
         const bundle = parseBundle(await file.text());
-        const { days, projects } = await store.exportRows();
+        const { days, projects, copies } = await store.exportRows();
         const localDays = new Map(days.map((row) => [row.name, row.text]));
-        const localDatabase = projects ? projects.text : null;
+        const localDatabases = new Map(
+          [...(projects ? [projects] : []), ...copies].map((row) => [row.name, row.text] as const),
+        );
         // The database a new device starts with is only a comment: an imported one replaces it.
-        const untouched = projects === undefined || projects === null || projects.text === DEFAULT_DATABASE;
+        const untouched = projects === null || projects.text === DEFAULT_DATABASE;
         const now = new Date();
-        const plan = planImport(bundle, localDays, localDatabase, now);
-        const copies: string[] = [];
+        const plan = planImport(bundle, localDays, localDatabases, now);
+        const kept: string[] = [];
         let added = 0;
         let same = 0;
         for (const action of plan) {
-          const replaces = action.kind === "conflict" && action.target === "database" && untouched;
+          const replaces =
+            action.kind === "conflict" && action.target === "database" && action.name === DATABASE_NAME && untouched;
           if (action.kind === "same") same += 1;
           else if (action.kind === "add" || replaces) {
             added += 1;
             if (action.target === "day") await store.createDay(action.name, action.text);
-            else {
+            else if (action.name === DATABASE_NAME) {
               const current = await store.readDatabase();
               if (current) await store.writeDatabase(action.text, current);
               else await store.putDatabaseCopy(DATABASE_NAME, action.text);
-            }
+            } else await store.putDatabaseCopy(action.name, action.text);
           } else {
-            copies.push(action.copy);
+            kept.push(action.copy);
             if (action.target === "day") await store.createDay(action.copy, action.text);
             else await store.putDatabaseCopy(action.copy, action.text);
           }
         }
         shell.dataChanged();
-        const conflictNote = copies.length
-          ? ` ${copies.length} file${copies.length === 1 ? " differs" : "s differ"} from this device and ${copies.length === 1 ? "was" : "were"} saved as ${copies.join(", ")}.`
+        await renderCopies();
+        const keptNote = kept.length
+          ? ` ${kept.length} file${kept.length === 1 ? " differs" : "s differ"} from this device and ${kept.length === 1 ? "was" : "were"} saved as ${kept.join(", ")}.`
           : "";
-        say(backupStatus, `Imported ${added} new, ${same} unchanged.${conflictNote}`, copies.length > 0);
-        if (copies.length) showNotice(`Import kept ${copies.length} conflicting copy${copies.length === 1 ? "" : "ies"}; see Settings.`);
+        say(backupStatus, `Imported ${added} new, ${same} unchanged.${keptNote}`, kept.length > 0);
+        if (kept.length) showNotice(`Import kept ${kept.length} conflicting copy${kept.length === 1 ? "" : "ies"}; see Settings.`);
       } catch (err) {
         say(backupStatus, `The backup was not imported: ${err instanceof Error ? err.message : String(err)}`, true);
       }
     });
 
     void fill();
+    void renderCopies();
     return {
-      show: () => void fill(),
+      show: () => {
+        void fill();
+        void renderCopies();
+      },
       hide: () => undefined,
     };
   };

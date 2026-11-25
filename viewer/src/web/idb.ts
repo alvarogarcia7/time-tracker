@@ -3,7 +3,7 @@
 // contract as the Node disk storage, so DayService behaves the same in both.
 import { sha256Hex } from "@core/hash";
 import type { SyncedState, SyncLocal } from "@core/sync";
-import { DatabaseFile, DayFile, DayFileInfo, DayService, Storage } from "@core/workspace";
+import { DatabaseFile, DayFile, DayFileInfo, DayService, Storage, StoreError } from "@core/workspace";
 
 const DB_NAME = "time-parser";
 const DB_VERSION = 1;
@@ -81,22 +81,65 @@ export class IdbStore implements Storage {
     return { name, text: row.text, hash: await sha256Hex(row.text) };
   }
 
+  // Replaces a day file only while its stored text is still expectedText. The check and the write are one
+  // transaction, so a save made in another tab or during a sync cannot slip in between.
+  private replaceDayIfText(
+    name: string,
+    text: string,
+    expectedText: string,
+  ): Promise<"ok" | "missing" | "changed"> {
+    const savedAt = this.now();
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(["days", "backups"], "readwrite");
+      let outcome: "ok" | "missing" | "changed" = "ok";
+      tx.oncomplete = () => resolve(outcome);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error("the change was not saved"));
+      const read = tx.objectStore("days").get(name);
+      read.onerror = () => reject(read.error);
+      read.onsuccess = () => {
+        const row = read.result as StoredText | undefined;
+        if (!row) {
+          outcome = "missing";
+          return;
+        }
+        if (row.text !== expectedText) {
+          outcome = "changed";
+          return;
+        }
+        tx.objectStore("days").put({ name, text, updated: savedAt } satisfies StoredText);
+        if (expectedText !== text) {
+          tx.objectStore("backups").add({ name, text: expectedText, savedAt } satisfies StoredBackup);
+        }
+      };
+    });
+  }
+
   async writeDay(name: string, text: string, previous: DayFile): Promise<{ hash: string }> {
     const hash = await sha256Hex(text);
-    const savedAt = this.now();
-    await transact(this.db, ["days", "backups"], (tx) => {
-      tx.objectStore("days").put({ name, text, updated: savedAt } satisfies StoredText);
-      if (previous.text !== text) {
-        tx.objectStore("backups").add({ name, text: previous.text, savedAt } satisfies StoredBackup);
-      }
-    });
+    const outcome = await this.replaceDayIfText(name, text, previous.text);
+    if (outcome === "missing") throw new StoreError(404, `${name}: not found in the editor folder`);
+    if (outcome === "changed") {
+      throw new StoreError(409, `${name} changed on disk since it was opened; reload it before saving`);
+    }
     return { hash };
   }
 
+  // Replaces a day file with text when it still reads as expectedText (used by the sync).
+  async replaceDayUnlessChanged(name: string, text: string, expectedText: string): Promise<boolean> {
+    return (await this.replaceDayIfText(name, text, expectedText)) === "ok";
+  }
+
+  // A new day file. An existing file of the same name is never replaced (the store refuses it).
   async createDay(name: string, text: string): Promise<{ hash: string }> {
     const hash = await sha256Hex(text);
-    await transact(this.db, ["days"], (tx) => {
-      tx.objectStore("days").put({ name, text, updated: this.now() } satisfies StoredText);
+    await new Promise<void>((resolve, reject) => {
+      const tx = this.db.transaction(["days"], "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error(`${name} was not created`));
+      const add = tx.objectStore("days").add({ name, text, updated: this.now() } satisfies StoredText);
+      add.onerror = () => reject(new StoreError(409, `${name} already exists`));
     });
     return { hash };
   }
@@ -133,13 +176,21 @@ export class IdbStore implements Storage {
     await this.putDatabaseCopy(DATABASE_NAME, DEFAULT_DATABASE);
   }
 
-  // Everything, for an export: the day files (sorted) and the database.
-  async exportRows(): Promise<{ days: StoredText[]; projects: StoredText | null }> {
+  // Everything, for an export: the day files (sorted), the database, and its conflict copies.
+  async exportRows(): Promise<{ days: StoredText[]; projects: StoredText | null; copies: StoredText[] }> {
     const days = await request<StoredText[]>(this.db.transaction("days").objectStore("days").getAll());
-    const projects =
-      (await request<StoredText | undefined>(this.db.transaction("database").objectStore("database").get(DATABASE_NAME))) ??
-      null;
-    return { days: days.sort(byName), projects };
+    const databases = await request<StoredText[]>(this.db.transaction("database").objectStore("database").getAll());
+    const projects = databases.find((row) => row.name === DATABASE_NAME) ?? null;
+    const copies = databases.filter((row) => row.name !== DATABASE_NAME).sort(byName);
+    return { days: days.sort(byName), projects, copies };
+  }
+
+  // Removes a conflict copy of the database. The database itself is never removed.
+  async deleteDatabaseCopy(name: string): Promise<void> {
+    if (name === DATABASE_NAME || !name.endsWith(".yml")) throw new Error(`${name}: not a project database copy`);
+    await transact(this.db, ["database"], (tx) => {
+      tx.objectStore("database").delete(name);
+    });
   }
 
   async backups(): Promise<StoredBackup[]> {
@@ -189,11 +240,7 @@ export function syncLocal(store: IdbStore): SyncLocal {
       if (!file) throw new Error(`${name}: not found on this device`);
       return { text: file.text };
     },
-    async write(name, text) {
-      const previous = await store.readDay(name);
-      if (!previous) throw new Error(`${name}: not found on this device`);
-      await store.writeDay(name, text, previous);
-    },
+    write: (name, text, expectedText) => store.replaceDayUnlessChanged(name, text, expectedText),
     async create(name, text) {
       await store.createDay(name, text);
     },

@@ -36,6 +36,9 @@ export function decodeBase64(text: string): string {
 
 const API = "https://api.github.com";
 
+// The contents API returns the text of a file only up to this size.
+export const CONTENTS_LIMIT = 1024 * 1024;
+
 function messageFor(status: number, repo: string): string {
   if (status === 401) return "GitHub rejected the token. Check the token in Settings.";
   if (status === 403) return "GitHub refused the request: the token may lack access to the data repository, or the rate limit was reached.";
@@ -82,9 +85,25 @@ export function githubRepo(options: GitHubOptions) {
         .map((item) => ({ name: String(item.name), sha: String(item.sha) }));
     },
 
+    // The text of a file. The contents answer has the text only up to CONTENTS_LIMIT bytes; larger
+    // files (and an answer with no text) are read through the blob API. A missing file throws (404).
     async get(name: string): Promise<{ text: string; sha: string }> {
       const data = await request("GET", `/contents/${encodeURIComponent(name)}`);
-      return { text: decodeBase64(String(data.content ?? "")), sha: String(data.sha) };
+      if (!data || Array.isArray(data) || data.type !== "file") throw new Error(`${name}: GitHub returned no file`);
+      const sha = String(data.sha);
+      const size = Number(data.size ?? 0);
+      const encoding = data.encoding;
+      if (encoding !== undefined && encoding !== "base64" && encoding !== "none") {
+        throw new Error(`${name}: unsupported encoding ${String(encoding)}`);
+      }
+      const inline = encoding === "base64" && typeof data.content === "string" && size <= CONTENTS_LIMIT;
+      if (inline && (data.content !== "" || size === 0)) return { text: decodeBase64(data.content), sha };
+
+      const blob = await request("GET", `/git/blobs/${sha}`);
+      if (!blob || blob.encoding !== "base64" || typeof blob.content !== "string") {
+        throw new Error(`${name}: GitHub did not return the file text`);
+      }
+      return { text: decodeBase64(blob.content), sha };
     },
 
     // Creates the file (sha null) or replaces it (sha is the blob sha the change is based on).

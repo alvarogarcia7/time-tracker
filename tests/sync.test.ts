@@ -36,6 +36,12 @@ class FakeGitHub {
         [...this.files].map(([name, file]) => ({ type: "file", name, path: name, sha: file.sha })),
       );
     }
+    const blob = path.match(new RegExp(`^${repo}/git/blobs/(.+)$`));
+    if (blob && method === "GET") {
+      const found = [...this.files.values()].find((file) => file.sha === blob[1]);
+      if (!found) return json(404, { message: "Not Found" });
+      return json(200, { sha: found.sha, size: new TextEncoder().encode(found.text).length, encoding: "base64", content: encodeBase64(found.text) });
+    }
     const match = path.match(new RegExp(`^${repo}/contents/(.+)$`));
     if (!match) return json(404, { message: "Not Found" });
     const name = decodeURIComponent(match[1]);
@@ -43,7 +49,8 @@ class FakeGitHub {
 
     if (method === "GET") {
       if (!existing) return json(404, { message: "Not Found" });
-      return json(200, { type: "file", name, path: name, sha: existing.sha, content: encodeBase64(existing.text) });
+      const size = new TextEncoder().encode(existing.text).length;
+      return json(200, { type: "file", name, path: name, sha: existing.sha, size, encoding: "base64", content: encodeBase64(existing.text) });
     }
     if (method === "PUT") {
       if (this.rejectPutFor.has(name)) return json(500, { message: "Server Error" });
@@ -79,11 +86,11 @@ class MemoryLocal implements SyncLocal {
     if (text === undefined) throw new Error(`${name}: missing`);
     return { text };
   }
-  async write(name: string, text: string) {
-    const previous = this.days.get(name);
-    if (previous === undefined) throw new Error(`${name}: missing`);
-    this.backups.push(previous);
+  async write(name: string, text: string, expectedText: string) {
+    if (this.days.get(name) !== expectedText) return false;
+    this.backups.push(expectedText);
     this.days.set(name, text);
+    return true;
   }
   async create(name: string, text: string) {
     if (this.days.has(name)) throw new Error(`${name}: exists`);
@@ -208,9 +215,85 @@ describe("sync of the day files", () => {
     assert.equal(gh.files.has("2026-11-25.md"), true);
   });
 
+  test("an edit saved while the remote text is downloading is kept as a copy, not overwritten", async () => {
+    const gh = new FakeGitHub();
+    const phone = new MemoryLocal();
+    const laptop = new MemoryLocal();
+    phone.days.set("2026-11-25.md", DAY);
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+    phone.days.set("2026-11-25.md", DAY + "- [ ] 1300 phone edit\n");
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+
+    // The laptop's user saves a new text while the sync downloads the phone's version.
+    const remote = gh.remote();
+    const racing = {
+      list: () => remote.list(),
+      put: (name: string, text: string, sha: string | null, message: string) => remote.put(name, text, sha, message),
+      get: async (name: string) => {
+        laptop.days.set(name, DAY + "- [ ] 1400 saved during sync\n");
+        return remote.get(name);
+      },
+    };
+    const outcome = await syncDays(laptop, racing, { device: "Laptop", now: NOW });
+    assert.equal(outcome.conflicts.length, 1);
+    const copy = outcome.conflicts[0].copy;
+    assert.equal(laptop.days.get("2026-11-25.md"), DAY + "- [ ] 1300 phone edit\n");
+    assert.equal(laptop.days.get(copy), DAY + "- [ ] 1400 saved during sync\n");
+    assert.equal(gh.files.get(copy)?.text, DAY + "- [ ] 1400 saved during sync\n");
+  });
+
   test("the conflict copy name is safe and never reuses a taken name", () => {
     const taken = new Set(["a.conflict-my-phone-20261125-101500.md"]);
     assert.equal(conflictName("a.md", "My Phone!", NOW, (name) => taken.has(name)), "a.conflict-my-phone-20261125-101500-2.md");
     assert.equal(conflictName("a.md", "", NOW, () => false), "a.conflict-device-20261125-101500.md");
+  });
+});
+
+describe("reading a file whose text is not in the contents answer", () => {
+  const TEXT = "25/11/2026\n- [ ] 0900 a file bigger than the contents answer carries\n";
+  const answer = (body: unknown) => async () => new Response(JSON.stringify(body), { status: 200 });
+  const client = (fetcher: (url: string) => Promise<Response>) =>
+    githubRepo({ owner: OWNER, repo: REPO, token: TOKEN, fetch: (url) => fetcher(String(url)) as Promise<Response> });
+
+  test("a file over the contents limit is read through the blob API, not as empty text", async () => {
+    const fetcher = async (url: string) =>
+      url.includes("/git/blobs/")
+        ? new Response(JSON.stringify({ encoding: "base64", content: encodeBase64(TEXT), size: TEXT.length }), { status: 200 })
+        : new Response(JSON.stringify({ type: "file", name: "2026-11-25.md", sha: "b1", size: 2_000_000, encoding: "none", content: "" }), { status: 200 });
+    const file = await client(fetcher).get("2026-11-25.md");
+    assert.equal(file.text, TEXT);
+    assert.equal(file.sha, "b1");
+  });
+
+  test("an answer with no text field is read through the blob API", async () => {
+    const fetcher = async (url: string) =>
+      url.includes("/git/blobs/")
+        ? new Response(JSON.stringify({ encoding: "base64", content: encodeBase64(TEXT) }), { status: 200 })
+        : new Response(JSON.stringify({ type: "file", name: "2026-11-25.md", sha: "b2", size: TEXT.length }), { status: 200 });
+    assert.equal((await client(fetcher).get("2026-11-25.md")).text, TEXT);
+  });
+
+  test("an encoding other than base64 is refused", async () => {
+    const fetcher = answer({ type: "file", name: "x.md", sha: "b3", size: 4, encoding: "utf-8", content: "abcd" });
+    await assert.rejects(client(fetcher as never).get("x.md"), /unsupported encoding utf-8/);
+  });
+
+  test("a blob that is not base64 is refused", async () => {
+    const fetcher = async (url: string) =>
+      url.includes("/git/blobs/")
+        ? new Response(JSON.stringify({ encoding: "utf-8", content: "text" }), { status: 200 })
+        : new Response(JSON.stringify({ type: "file", name: "x.md", sha: "b4", size: 0, encoding: "none", content: "" }), { status: 200 });
+    await assert.rejects(client(fetcher).get("x.md"), /did not return the file text/);
+  });
+
+  test("a file that does not exist is an error, never empty text", async () => {
+    const fetcher = async () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+    await assert.rejects(client(fetcher).get("gone.md"), (err: unknown) => err instanceof GitHubError && err.status === 404);
+  });
+
+  test("an empty file is empty text", async () => {
+    const fetcher = answer({ type: "file", name: "e.md", sha: "b5", size: 0, encoding: "base64", content: "" });
+    assert.equal((await client(fetcher as never).get("e.md")).text, "");
   });
 });

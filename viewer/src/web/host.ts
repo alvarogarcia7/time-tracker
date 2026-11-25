@@ -1,6 +1,7 @@
 // The parts of the installed web app that the editor page does not know about: the settings that
 // the sync needs, the sync itself, the offline support (service worker), and the notice bar.
 import { githubRepo } from "@core/github";
+import { serialised } from "@core/serial";
 import { syncDays, SyncOutcome } from "@core/sync";
 import type { Shell } from "../shell";
 import { IdbStore, syncLocal } from "./idb";
@@ -46,7 +47,7 @@ export function describeOutcome(outcome: SyncOutcome): string {
 }
 
 // Runs one sync when a token and an owner are saved. Offline, the changes stay on this device.
-export async function runSync(store: IdbStore, shell: Shell): Promise<{ message: string; isError: boolean }> {
+async function runSync(store: IdbStore, shell: Shell): Promise<{ message: string; isError: boolean }> {
   const settings = await loadSettings(store);
   if (!settings.token || !settings.owner) return { message: "Sync is off until you save the owner and a token in Settings.", isError: false };
   if (!navigator.onLine) return { message: "Offline: changes are kept on this device and sync when you are online.", isError: false };
@@ -58,6 +59,12 @@ export async function runSync(store: IdbStore, shell: Shell): Promise<{ message:
   } catch (err) {
     return { message: `Sync failed: ${err instanceof Error ? err.message : String(err)}`, isError: true };
   }
+}
+
+// Every sync goes through one queue, so the open-time sync, the reconnect and the button never overlap.
+const queue = serialised();
+export function syncNow(store: IdbStore, shell: Shell): Promise<{ message: string; isError: boolean }> {
+  return queue(() => runSync(store, shell));
 }
 
 // ---- the notice bar ----------------------------------------------------------------

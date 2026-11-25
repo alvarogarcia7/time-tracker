@@ -4,7 +4,7 @@ import "./styles.css";
 import { startPage } from "./app";
 import { openLocal } from "./web/idb";
 import { mountSettings } from "./web/settings";
-import { loadSettings, registerOffline, requestPersistence, runSync, showNotice } from "./web/host";
+import { loadSettings, registerOffline, requestPersistence, showNotice, syncNow } from "./web/host";
 
 async function start(): Promise<void> {
   registerOffline();
@@ -24,7 +24,7 @@ async function start(): Promise<void> {
   // Sync on open, and again when the connection comes back. iOS has no background sync, so the page
   // does it only while it is open.
   const sync = async () => {
-    const result = await runSync(store, shell);
+    const result = await syncNow(store, shell);
     if (result.message.startsWith("Synced") || result.isError) showNotice(result.message);
   };
   window.addEventListener("online", () => void sync());

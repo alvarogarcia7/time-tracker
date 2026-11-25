@@ -64,3 +64,45 @@ test("an export is one JSON file, importing it again changes nothing, and a chan
   await expect(page.locator("#editor-file")).toHaveValue(file);
   await expect(page.locator("#file-list li", { hasText: ".conflict-" })).toHaveCount(1);
 });
+
+test("a conflict copy of the project database is listed in Settings, exported, and can be deleted", async ({ page }, testInfo) => {
+  const databaseBackup = (projects: string) =>
+    JSON.stringify({
+      format: "time-parser-bundle",
+      version: 1,
+      exported: new Date().toISOString(),
+      days: [],
+      projects: { name: "projects.yml", text: projects, updated: new Date().toISOString() },
+    });
+  await openApp(page);
+  await page.getByRole("tab", { name: "Settings" }).click();
+  // The first import replaces the empty database this device starts with.
+  const first = testInfo.outputPath("first-projects.json");
+  writeFileSync(first, databaseBackup("sample-a:\n  keywords: [alpha]\n"));
+  await page.locator("#import-file").setInputFiles(first);
+  await expect(page.locator("#backup-status")).toContainText("Imported 1 new");
+  // The second one differs from the database now on the device: it is kept as a copy.
+  const second = testInfo.outputPath("second-projects.json");
+  writeFileSync(second, databaseBackup("sample-b:\n  keywords: [beta]\n"));
+  await page.locator("#import-file").setInputFiles(second);
+  await expect(page.locator("#backup-status")).toContainText("saved as projects.conflict-");
+
+  const listed = page.locator("#copies-list li");
+  await expect(listed).toHaveCount(1);
+  await expect(listed.first()).toContainText("projects.conflict-");
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export backup", exact: true }).click(),
+  ]);
+  const exported = JSON.parse(readFileSync(await download.path(), "utf-8"));
+  expect(exported.projectCopies.map((copy: { name: string }) => copy.name)).toEqual([
+    expect.stringMatching(/^projects\.conflict-.*\.yml$/),
+  ]);
+  expect(exported.projectCopies[0].text).toBe("sample-b:\n  keywords: [beta]\n");
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await listed.first().getByRole("button", { name: "Delete" }).click();
+  await expect(listed).toHaveCount(0);
+  await expect(page.locator("#copies-empty")).toBeVisible();
+});

@@ -17,8 +17,10 @@ export interface SyncedState {
 export interface SyncLocal {
   list(): Promise<{ name: string; hash: string }[]>;
   read(name: string): Promise<{ text: string }>;
-  // Replaces a day file (the previous version is kept by the store).
-  write(name: string, text: string): Promise<void>;
+  // Replaces a day file with text, but only while the file still reads as expectedText. The check and the
+  // replacement are one step in the store, so an edit made meanwhile is never overwritten. Returns false
+  // when the file changed. The previous version is kept by the store.
+  write(name: string, text: string, expectedText: string): Promise<boolean>;
   create(name: string, text: string): Promise<void>;
   synced(): Promise<Map<string, SyncedState>>;
   setSynced(name: string, state: SyncedState): Promise<void>;
@@ -80,7 +82,7 @@ export async function syncDays(local: SyncLocal, remote: SyncRemote, options: Sy
     if (mine && !theirs) {
       const { text } = await local.read(name);
       const pushed = await remote.put(name, text, null, commit(name));
-      await local.setSynced(name, { hash: mine.hash, sha: pushed.sha });
+      await local.setSynced(name, { hash: await sha256Hex(text), sha: pushed.sha });
       outcome.pushed.push(name);
       return;
     }
@@ -100,33 +102,39 @@ export async function syncDays(local: SyncLocal, remote: SyncRemote, options: Sy
     if (localChanged && !remoteChanged) {
       const { text } = await local.read(name);
       const pushed = await remote.put(name, text, theirs.sha, commit(name));
-      await local.setSynced(name, { hash: mine.hash, sha: pushed.sha });
+      await local.setSynced(name, { hash: await sha256Hex(text), sha: pushed.sha });
       outcome.pushed.push(name);
       return;
     }
 
+    // The remote changed. Read the file on this device again after the download: an edit saved during
+    // the sync counts as a change on this side too.
     const file = await remote.get(name);
     const remoteHash = await sha256Hex(file.text);
-    if (remoteHash === mine.hash) {
-      await local.setSynced(name, { hash: mine.hash, sha: file.sha });
+    const current = (await local.read(name)).text;
+    const currentHash = await sha256Hex(current);
+    if (remoteHash === currentHash) {
+      await local.setSynced(name, { hash: currentHash, sha: file.sha });
       return;
     }
-    if (!localChanged) {
-      await local.write(name, file.text);
+    const changedHere = localChanged || currentHash !== mine.hash;
+    if (!changedHere && (await local.write(name, file.text, current))) {
       await local.setSynced(name, { hash: remoteHash, sha: file.sha });
       outcome.pulled.push(name);
       return;
     }
 
-    // Both sides changed: keep the remote version as the file and this device's version as a copy.
-    const { text: mineText } = await local.read(name);
-    await local.write(name, file.text);
-    await local.setSynced(name, { hash: remoteHash, sha: file.sha });
+    // Both sides changed: keep the remote version as the file and this device's newest version as a copy.
+    const latest = (await local.read(name)).text;
     const copy = conflictName(name, options.device, options.now, (candidate) => localFiles.has(candidate) || remoteFiles.has(candidate));
-    await local.create(copy, mineText);
-    const copied = await remote.put(copy, mineText, null, commit(copy));
-    await local.setSynced(copy, { hash: await sha256Hex(mineText), sha: copied.sha });
-    localFiles.set(copy, { name: copy, hash: await sha256Hex(mineText) });
+    await local.create(copy, latest);
+    if (!(await local.write(name, file.text, latest))) {
+      throw new Error("the file changed again during the sync; the next sync will pick it up");
+    }
+    await local.setSynced(name, { hash: remoteHash, sha: file.sha });
+    const copied = await remote.put(copy, latest, null, commit(copy));
+    await local.setSynced(copy, { hash: await sha256Hex(latest), sha: copied.sha });
+    localFiles.set(copy, { name: copy, hash: await sha256Hex(latest) });
     remoteFiles.set(copy, { name: copy, sha: copied.sha });
     outcome.conflicts.push({ name, copy });
   }

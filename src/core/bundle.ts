@@ -17,15 +17,23 @@ export interface Bundle {
   exported: string;
   days: BundleFile[];
   projects: BundleFile | null;
+  // Copies of the project database kept by an import conflict (projects.conflict-<stamp>.yml).
+  projectCopies: BundleFile[];
 }
 
-export function makeBundle(days: BundleFile[], projects: BundleFile | null, exported: Date): Bundle {
+export function makeBundle(
+  days: BundleFile[],
+  projects: BundleFile | null,
+  exported: Date,
+  projectCopies: BundleFile[] = [],
+): Bundle {
   return {
     format: BUNDLE_FORMAT,
     version: 1,
     exported: exported.toISOString(),
     days: [...days].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     projects,
+    projectCopies: [...projectCopies].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
   };
 }
 
@@ -52,10 +60,16 @@ export function parseBundle(text: string): Bundle {
   if (bundle.projects !== null && bundle.projects !== undefined && !isFileEntry(bundle.projects)) {
     throw new Error("the projects database is malformed");
   }
+  if (bundle.projectCopies !== undefined && (!Array.isArray(bundle.projectCopies) || !bundle.projectCopies.every(isFileEntry))) {
+    throw new Error("the project database copies are malformed");
+  }
   for (const day of bundle.days) {
     if (!day.name.endsWith(".md") || day.name.includes("/")) throw new Error(`${day.name}: not a day file name`);
   }
-  return { ...bundle, projects: bundle.projects ?? null } as Bundle;
+  for (const copy of bundle.projectCopies ?? []) {
+    if (!copy.name.endsWith(".yml") || copy.name.includes("/")) throw new Error(`${copy.name}: not a project database name`);
+  }
+  return { ...bundle, projects: bundle.projects ?? null, projectCopies: bundle.projectCopies ?? [] } as Bundle;
 }
 
 export type ImportAction =
@@ -75,15 +89,16 @@ export function importCopyName(name: string, now: Date, taken: (name: string) =>
 }
 
 // Decides what to do with each file of the bundle, given the texts already on the device.
-// localDays: name to text of the day files; localDatabase: the projects.yml text, when there is one.
+// localDays: name to text of the day files; localDatabases: name to text of each project database file
+// (projects.yml and its conflict copies).
 export function planImport(
   bundle: Bundle,
   localDays: Map<string, string>,
-  localDatabase: string | null,
+  localDatabases: Map<string, string>,
   now: Date,
 ): ImportAction[] {
   const actions: ImportAction[] = [];
-  const taken = new Set(localDays.keys());
+  const taken = new Set([...localDays.keys(), ...localDatabases.keys()]);
   const place = (target: "day" | "database", name: string, text: string, existing: string | null) => {
     if (existing === null) {
       actions.push({ kind: "add", target, name, text });
@@ -96,6 +111,7 @@ export function planImport(
     }
   };
   for (const day of bundle.days) place("day", day.name, day.text, localDays.get(day.name) ?? null);
-  if (bundle.projects) place("database", "projects.yml", bundle.projects.text, localDatabase);
+  const databases = [...(bundle.projects ? [bundle.projects] : []), ...bundle.projectCopies];
+  for (const entry of databases) place("database", entry.name, entry.text, localDatabases.get(entry.name) ?? null);
   return actions;
 }

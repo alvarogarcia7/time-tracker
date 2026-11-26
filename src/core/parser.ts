@@ -17,7 +17,7 @@ import { HEADER_RE } from "./header";
 import { htmlToMarkdown, looksLikeHtml } from "./html";
 import { PARSER_VERSION, SCHEMA_REFERENCE } from "./version";
 import { UNKNOWN_PROJECT } from "./summary";
-import { Projects, parseDescription } from "./description";
+import { Projects, keywordsOverlap, parseDescription } from "./description";
 
 export { detectProject, parseDescription } from "./description";
 export type { Projects, DescriptionParts } from "./description";
@@ -106,6 +106,7 @@ export function formatMinutes24(minutes: number): string {
 export function validateProjects(projects: Record<string, unknown>): Projects {
   const normalised: Projects = new Map();
   const ownerOf = new Map<string, string>();
+  const seen: [string, string][] = []; // each keyword with its project, for the overlap check
   for (const [name, value] of Object.entries(projects)) {
     if (!name.trim()) throw new TimeParseError("project name must be a non-empty string; quote it in YAML");
     if (name === UNKNOWN_PROJECT) throw new TimeParseError(`"${UNKNOWN_PROJECT}" is reserved for entries without a project`);
@@ -123,7 +124,15 @@ export function validateProjects(projects: Record<string, unknown>): Projects {
         if (owner === name) throw new TimeParseError(`project '${name}': keyword '${text}' is listed twice`);
         throw new TimeParseError(`keyword '${text}' maps to both '${owner}' and '${name}'`);
       }
+      for (const [other, owner] of seen) {
+        // A project and one below it may share a keyword (car and car:maintainance): the deepest one wins.
+        const descent = name.startsWith(`${owner}:`) || owner.startsWith(`${name}:`);
+        if (owner !== name && !descent && keywordsOverlap(text, other)) {
+          throw new TimeParseError(`keyword '${text}' of '${name}' overlaps keyword '${other}' of '${owner}'; a description with one matches both`);
+        }
+      }
       ownerOf.set(folded, name);
+      seen.push([text, name]);
       words.push(text);
     }
     normalised.set(name, words);
@@ -235,66 +244,81 @@ function parseTasks(text: string): Draft[] {
   return drafts;
 }
 
+// The timeline: minutes from the start of the day, where a value of 1440 or more is the next day.
+// An absolute entry is placed on the first day that does not put it before the entry before it, so a
+// clock that goes back means the entry passes midnight. Relative entries are placed on the same timeline,
+// so "-d" and "+d" may cross midnight too.
 function resolveStarts(drafts: Draft[]): number[] {
-  const starts: (number | null)[] = drafts.map((draft) => (draft.sign ? null : draft.minutes));
+  const starts: number[] = drafts.map(() => NaN);
+  // The start of the last entry that is placed and is not waiting for a later one (null at the start of the day).
+  let previous: number | null = null;
+  // Indices of the "-d" entries waiting for the absolute entry after them.
+  let run: number[] = [];
 
-  // "-d" starts d before the next entry starts. Consecutive "-d" entries are chained backwards from
-  // the absolute entry that ends the run: the last one is resolved first, then the one before it, and so on.
-  for (let index = drafts.length - 1; index >= 0; index--) {
+  drafts.forEach((draft, index) => {
+    if (draft.sign === "-") {
+      run.push(index);
+      return;
+    }
+    if (draft.sign === "+") {
+      if (run.length) throw needsFollowing(drafts[run[run.length - 1]]);
+      if (previous === null) {
+        throw new TimeParseError(`line ${draft.line}: relative time '${draft.timeExpression}' needs a preceding entry`);
+      }
+      starts[index] = previous + draft.minutes;
+      previous = starts[index];
+      return;
+    }
+
+    // An absolute entry: the earliest day where it starts no earlier than the entry before the "-d" run,
+    // plus the run's total, so the whole run fits after that entry.
+    const clock = draft.minutes;
+    let start = clock;
+    if (previous !== null) {
+      const runTotal = run.reduce((sum, i) => sum + drafts[i].minutes, 0);
+      const days = Math.max(0, Math.ceil((previous + runTotal - clock) / MINUTES_PER_DAY));
+      start = clock + days * MINUTES_PER_DAY;
+    }
+    // "-d" starts d before the entry after it: the last one is placed first, then the one before it, and so on.
+    let next = start;
+    for (let k = run.length - 1; k >= 0; k--) {
+      next -= drafts[run[k]].minutes;
+      starts[run[k]] = next;
+    }
+    starts[index] = start;
+    previous = start;
+    run = [];
+  });
+  if (run.length) throw needsFollowing(drafts[run[run.length - 1]]);
+
+  starts.forEach((start, index) => {
     const draft = drafts[index];
-    if (draft.sign !== "-") continue;
-    const next = index + 1 < drafts.length ? starts[index + 1] : null;
-    if (next === null) {
-      throw new TimeParseError(`line ${draft.line}: relative time '${draft.timeExpression}' needs a following absolute time`);
+    if (start < 0) {
+      throw new TimeParseError(`line ${draft.line}: time -${formatMinutes24(-start)} is outside the day`);
     }
-    starts[index] = next - draft.minutes;
+    if (start >= 2 * MINUTES_PER_DAY) {
+      throw new TimeParseError(
+        `line ${draft.line}: entry starts at ${formatMinutes24(start % MINUTES_PER_DAY)}, after the previous entry; ` +
+          "only one entry may pass midnight in a day",
+      );
+    }
+  });
+
+  // The one passage past midnight: the entry before it must start after 21:00.
+  const crossing = starts.findIndex((start) => start >= MINUTES_PER_DAY);
+  if (crossing > 0 && starts[crossing - 1] % MINUTES_PER_DAY <= MIDNIGHT_CUTOFF) {
+    const draft = drafts[crossing];
+    throw new TimeParseError(
+      `line ${draft.line}: entry starts at ${formatMinutes24(starts[crossing] % MINUTES_PER_DAY)}, after the entry at ` +
+        `${formatMinutes24(starts[crossing - 1] % MINUTES_PER_DAY)} and past midnight; ` +
+        "an entry may pass midnight only when the entry before it starts after 21:00",
+    );
   }
+  return starts;
+}
 
-  drafts.forEach((draft, index) => {
-    if (draft.sign !== "+") return;
-    let anchor: number | null = null;
-    for (let previous = index - 1; previous >= 0; previous--) {
-      if (starts[previous] !== null) {
-        anchor = starts[previous];
-        break;
-      }
-    }
-    if (anchor === null) {
-      throw new TimeParseError(`line ${draft.line}: relative time '${draft.timeExpression}' needs a preceding entry`);
-    }
-    starts[index] = anchor + draft.minutes;
-  });
-
-  // The timeline: minutes from the start of the day. A new entry may start earlier on the clock
-  // only when the previous one passes midnight, so the clock goes back once and the timeline
-  // carries on into the next day. A second passage in the same file is an error.
-  const timeline: number[] = [];
-  let offset = 0;
-  drafts.forEach((draft, index) => {
-    const start = starts[index] as number;
-    if (start < 0 || start >= MINUTES_PER_DAY) {
-      throw new TimeParseError(`line ${draft.line}: time ${formatMinutes24(start)} is outside the day`);
-    }
-    const last = timeline[timeline.length - 1];
-    if (last !== undefined && start + offset < last) {
-      const previous = formatMinutes24(last % MINUTES_PER_DAY);
-      if (offset > 0) {
-        throw new TimeParseError(
-          `line ${draft.line}: entry starts at ${formatMinutes24(start)}, before the previous entry at ${previous}; ` +
-            "only one entry may pass midnight in a day",
-        );
-      }
-      if (last % MINUTES_PER_DAY <= MIDNIGHT_CUTOFF) {
-        throw new TimeParseError(
-          `line ${draft.line}: entry starts at ${formatMinutes24(start)}, before the previous entry at ${previous}; ` +
-            "an entry may pass midnight only when the entry before it starts after 21:00",
-        );
-      }
-      offset = MINUTES_PER_DAY;
-    }
-    timeline.push(start + offset);
-  });
-  return timeline;
+function needsFollowing(draft: Draft): TimeParseError {
+  return new TimeParseError(`line ${draft.line}: relative time '${draft.timeExpression}' needs a following absolute time`);
 }
 
 // starts: the timeline from resolveStarts. A reference compares clock times, so 8 is 08:00 on either side of midnight.

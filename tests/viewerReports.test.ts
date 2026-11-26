@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { parseDay, TimeParseError } from "../src/core/parser";
-import { loadDatabase, buildReport, EntryRecord, recordsFromFiles, unregisteredSuggestions, Database } from "../src/core/reports";
+import { loadDatabase, buildReport, EntryRecord, recordsFromFiles, unregisteredSuggestions, Database, rangeLabel } from "../src/core/reports";
 import { renderDocument, renderEntries, renderProjects, renderReport, renderTable } from "../src/core/textView";
 import { TimeEntryDay, formatMinutes, validate } from "../src/core/summary";
 
@@ -107,6 +107,20 @@ test("the text report has the header, the period table and the project table", (
   assert.ok(text.includes("Hours per period"));
   assert.ok(text.includes("Hours per project"));
   assert.ok(text.includes("uncategorised"));
+});
+
+test("the Reports header names the range the controls show", () => {
+  assert.equal(rangeLabel("2026-01-01", "2026-01-31"), "2026-01-01 to 2026-01-31");
+  assert.equal(rangeLabel("2026-01-01", null), "from 2026-01-01");
+  assert.equal(rangeLabel(null, "2026-01-31"), "to 2026-01-31");
+  assert.equal(rangeLabel(null, null), "no range chosen");
+});
+
+test("Reports refuses a .md day file with a plain message and no records", () => {
+  const { records, skipped } = recordsFromFiles([{ name: "2026-01-15.md", text: "# 15/01\n\n- [ ] 0800 gym\n" }], DB);
+
+  assert.equal(records.length, 0);
+  assert.deepEqual(skipped, ["2026-01-15.md: Reports needs JSON"]);
 });
 
 test("skipped files are listed in the text report", () => {

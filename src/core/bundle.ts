@@ -43,6 +43,11 @@ function isFileEntry(value: unknown): value is BundleFile {
   return typeof entry.name === "string" && typeof entry.text === "string" && typeof entry.updated === "string";
 }
 
+// The name of a copy of the project database: a plain .yml file name, other than projects.yml itself.
+export function isDatabaseCopyName(name: string): boolean {
+  return name.endsWith(".yml") && name !== "projects.yml" && name !== ".yml" && !/[\/\\]/.test(name) && !name.startsWith(".");
+}
+
 // Checks the shape of a bundle; throws a message that names the problem.
 export function parseBundle(text: string): Bundle {
   let value: unknown;
@@ -57,8 +62,11 @@ export function parseBundle(text: string): Bundle {
   }
   if (bundle.version !== 1) throw new Error(`unsupported export version ${String(bundle.version)}`);
   if (!Array.isArray(bundle.days) || !bundle.days.every(isFileEntry)) throw new Error("the days list is malformed");
-  if (bundle.projects !== null && bundle.projects !== undefined && !isFileEntry(bundle.projects)) {
-    throw new Error("the projects database is malformed");
+  if (bundle.projects !== null && bundle.projects !== undefined) {
+    if (!isFileEntry(bundle.projects)) throw new Error("the projects database is malformed");
+    if (bundle.projects.name !== "projects.yml") {
+      throw new Error(`${bundle.projects.name}: not the project database (projects.yml)`);
+    }
   }
   if (bundle.projectCopies !== undefined && (!Array.isArray(bundle.projectCopies) || !bundle.projectCopies.every(isFileEntry))) {
     throw new Error("the project database copies are malformed");
@@ -67,7 +75,7 @@ export function parseBundle(text: string): Bundle {
     if (!day.name.endsWith(".md") || day.name.includes("/")) throw new Error(`${day.name}: not a day file name`);
   }
   for (const copy of bundle.projectCopies ?? []) {
-    if (!copy.name.endsWith(".yml") || copy.name.includes("/")) throw new Error(`${copy.name}: not a project database name`);
+    if (!isDatabaseCopyName(copy.name)) throw new Error(`${copy.name}: not a project database name`);
   }
   return { ...bundle, projects: bundle.projects ?? null, projectCopies: bundle.projectCopies ?? [] } as Bundle;
 }

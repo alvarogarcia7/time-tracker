@@ -7,7 +7,8 @@ import { createServer, IncomingMessage, Server, ServerResponse } from "node:http
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 
-import { DatabaseFile, DayFile, DayFileInfo, DayService, Storage, StoreError } from "../core/workspace";
+import { headerDate } from "../core/dayFiles";
+import { databaseChanged, DatabaseFile, DayFile, DayFileInfo, DayService, Storage, StoreError } from "../core/workspace";
 export type { ParseResult } from "../core/workspace";
 
 export const MAX_BODY = 5 * 1024 * 1024;
@@ -38,14 +39,18 @@ export class DiskStorage implements Storage {
   }
 
   async listDays(): Promise<DayFileInfo[]> {
-    return this.dayFiles().map((name) => ({ name, hash: digest(readFileSync(join(this.folder, name))) }));
+    return this.dayFiles().map((name) => {
+      const data = readFileSync(join(this.folder, name));
+      return { name, hash: digest(data), date: headerDate(data.toString("utf-8"), new Date().getFullYear()) };
+    });
   }
 
   async readDay(name: string): Promise<DayFile | null> {
     const path = join(this.folder, basename(name));
     if (!isFile(path)) return null;
     const data = readFileSync(path);
-    return { name, text: data.toString("utf-8"), hash: digest(data) };
+    const text = data.toString("utf-8");
+    return { name, text, hash: digest(data), date: headerDate(text, new Date().getFullYear()) };
   }
 
   async writeDay(name: string, text: string, previous: DayFile): Promise<{ hash: string }> {
@@ -78,8 +83,11 @@ export class DiskStorage implements Storage {
     return { text: data.toString("utf-8"), hash: digest(data) };
   }
 
+  // No await between the read and the write, so nothing else in this process can change the file
+  // in between.
   async writeDatabase(text: string, previous: DatabaseFile): Promise<{ hash: string }> {
-    if (this.db === undefined) throw new StoreError(404, "no project database");
+    if (this.db === undefined || !isFile(this.db)) throw new StoreError(404, "no project database");
+    if (readFileSync(this.db, "utf-8") !== previous.text) throw databaseChanged(this.databaseLabel);
     const next = Buffer.from(text, "utf-8");
     if (previous.text !== text) {
       mkdirSync(this.backups, { recursive: true });

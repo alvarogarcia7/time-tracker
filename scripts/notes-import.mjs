@@ -2,9 +2,13 @@
 // Bulk import of the Toggl notes exported by Notes Exporter.
 //
 //   node scripts/notes-import.mjs select --root EXPORT_ROOT --out IMPORT_DIR
+//                                        [--exclude FOLDER]... [--include FOLDER]...
 //       Picks the notes whose file name (or title) contains "toggl", copies their
 //       Markdown files into IMPORT_DIR, writes selection.json with the checks, and
 //       writes delete.sh, which removes the original files once the import is accepted.
+//       Every folder is selected except those excluded: iCloud-Recently-Deleted by default, and the
+//       folders named with --exclude. --include takes a folder back (for example a folder inside an
+//       excluded one). A folder name also covers its subfolders.
 //   node scripts/notes-import.mjs review --out IMPORT_DIR
 //       After the Markdown files were converted (make import), prints the files to
 //       review and the files to categorize, and writes REPORT.md.
@@ -13,8 +17,9 @@
 // and Markdown (EXPORT_ROOT/md/<subdir>/<filename>.md); writes nothing into the export.
 
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
@@ -52,6 +57,10 @@ const { positionals, values } = parseArgs({
   options: {
     root: { type: "string" },
     out: { type: "string" },
+    file: { type: "string" },
+    ledger: { type: "string" },
+    include: { type: "string", multiple: true },
+    exclude: { type: "string", multiple: true },
   },
 });
 const [command] = positionals;
@@ -88,7 +97,7 @@ function trackerRecords(root) {
     if (!name.endsWith(".json") || name.startsWith(".")) continue;
     const tracker = JSON.parse(readFileSync(join(dataDir, name), "utf8"));
     for (const [noteNo, rec] of Object.entries(tracker)) {
-      if (rec && !rec.deletedAt) records.push({ noteNo, ...rec });
+      if (rec && !rec.deletedAt) records.push({ noteNo, tracker: name, ...rec });
     }
   }
   return records;
@@ -98,14 +107,88 @@ function isToggl(rec) {
   return /toggl/i.test(rec.filename ?? "") || /toggl/i.test(rec.title ?? "");
 }
 
+// Folders left out unless --include names them. Notes Exporter's Recently Deleted holds the notes deleted in iCloud.
+const DEFAULT_EXCLUDED_FOLDERS = ["iCloud-Recently-Deleted"];
+
+// The folder rules, in the order they were given: the defaults, then --exclude, then --include, so an
+// --include of the same folder as an exclude wins. A rule names a folder and its subfolders.
+function folderRules(includes, excludes) {
+  const named = (list, include, origin) => list.map((text) => {
+    const pattern = text.trim().replace(/^\/+|\/+$/g, "");
+    if (!pattern) fail(`${origin} needs a folder name`);
+    return { pattern, include, origin };
+  });
+  return [
+    ...named(DEFAULT_EXCLUDED_FOLDERS, false, "default"),
+    ...named(excludes, false, "--exclude"),
+    ...named(includes, true, "--include"),
+  ];
+}
+
+// The rule that decides a note with these folder names: the most specific matching rule (the one with the
+// most folder levels), and with equal depth the later rule. A note no rule matches is selected.
+function decideFolder(names, rules) {
+  let best = null;
+  for (const rule of rules) {
+    const matches = names.some((name) => name === rule.pattern || name.startsWith(`${rule.pattern}/`));
+    if (!matches) continue;
+    const depth = rule.pattern.split("/").length;
+    if (best === null || depth >= best.depth) best = { ...rule, depth };
+  }
+  if (best !== null) return best;
+  return { pattern: null, include: true, origin: null };
+}
+
+// The folder names a note is filed under: its output subdirectory, and its folder path (Work/Projects).
+function folderNames(rec) {
+  const names = [rec.subdir ?? ""];
+  if (Array.isArray(rec.folderPath) && rec.folderPath.length) names.push(rec.folderPath.join("/"));
+  return names.filter((name) => name !== "");
+}
+
+// The ledger: one entry per imported Apple Notes note, with the copy the import wrote. See docs/notes-import.md.
+const LEDGER_NAME = "imports.json";
+
+const sha256 = (data) => createHash("sha256").update(data).digest("hex");
+
+// The Notes id of the note. Records from before Notes Exporter 1.3.0 that never exported again have none.
+const noteKey = (rec) => rec.id ?? `legacy:${rec.tracker}/${rec.noteNo}`;
+
+function readLedger(path) {
+  return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { version: 1, notes: {} };
+}
+
+function writeLedger(path, ledger) {
+  writeFileSync(path, JSON.stringify(ledger, null, 2) + "\n");
+}
+
+function isoDay(date) {
+  return `${date.y}-${String(date.m).padStart(2, "0")}-${String(date.d).padStart(2, "0")}`;
+}
+
 function select() {
   const root = values.root ?? process.env.NOTES_EXPORT_ROOT_DIR ?? join(homedir(), "Downloads", "AppleNotesExport");
   const out = values.out;
   if (!out) fail("select needs --out IMPORT_DIR");
   mkdirSync(out, { recursive: true });
 
-  const notes = [];
+  // The import folders live in data/in; the ledger is kept there too, so it outlives each folder.
+  const importRoot = dirname(out);
+  const folderName = basename(out);
+  const ledgerPath = join(importRoot, LEDGER_NAME);
+  const ledger = readLedger(ledgerPath);
+
+  const rules = folderRules(values.include ?? [], values.exclude ?? []);
+  const notes = []; // copied into this folder (new or updated), or Markdown missing
+  const unchanged = []; // imported before, and not changed in Apple Notes since
+  const conflicts = []; // changed in Apple Notes, and the local copy was edited: nothing copied
+  const skipped = [];
   for (const rec of trackerRecords(root).filter(isToggl).sort((a, b) => a.noteNo.localeCompare(b.noteNo, undefined, { numeric: true }))) {
+    const decision = decideFolder(folderNames(rec), rules);
+    if (!decision.include) {
+      skipped.push({ noteNo: rec.noteNo, title: rec.title ?? "", folder: rec.subdir ?? "", rule: decision.pattern });
+      continue;
+    }
     const problems = [];
     const created = localDate(rec.createdAt);
     const file = `${rec.filename}.md`;
@@ -118,10 +201,13 @@ function select() {
     let date = created;
     let dateFrom = "createdAt";
     let notice = null;
-    if (!existsSync(source)) {
+    let prepared = null;
+    const sourceData = existsSync(source) ? readFileSync(source) : null;
+    if (sourceData === null) {
       problems.push(`no Markdown file at md/${rec.subdir ?? ""}/${file}`);
     } else {
-      const header = firstNonEmptyLine(readFileSync(source, "utf8"));
+      const text = sourceData.toString("utf8");
+      const header = firstNonEmptyLine(text);
       const found = HEADER_DATE.exec(header);
       if (found) {
         const day = Number(found[1]);
@@ -137,32 +223,92 @@ function select() {
       } else if (!created) {
         problems.push("no date in the first line and no creation date");
       }
-      const prepared = withParsableHeader(readFileSync(source, "utf8"), date, dateFrom);
-      writeFileSync(join(out, file), prepared.text);
+      prepared = withParsableHeader(text, date, dateFrom);
       notice = prepared.notice;
     }
 
-    notes.push({
+    const note = {
       noteNo: rec.noteNo,
       title: rec.title ?? "",
       filename: rec.filename,
       file,
-      source: existsSync(source) ? source : null,
+      source: sourceData === null ? null : source,
       related,
       createdAt: rec.createdAt ?? null,
-      date: date ? `${date.y}-${String(date.m).padStart(2, "0")}-${String(date.d).padStart(2, "0")}` : null,
+      folder: rec.subdir ?? "",
+      date: date ? isoDay(date) : null,
       dateFrom,
       problems,
       notice,
-    });
-  }
+    };
+    if (prepared === null) {
+      notes.push({ ...note, status: "missing" });
+      continue;
+    }
 
-  const selection = { root, selectedAt: new Date().toISOString(), notes };
+    // Decide from the ledger: is there a copy, has Apple Notes changed, and has the copy been edited?
+    const key = noteKey(rec);
+    const entry = ledger.notes[key];
+    const localPath = entry ? join(importRoot, entry.file) : null;
+    const sourceHash = sha256(sourceData);
+    let status = "new";
+    if (entry && existsSync(localPath)) {
+      if (entry.sourceHash === sourceHash) status = "unchanged";
+      else if (sha256(readFileSync(localPath)) === entry.importedHash) status = "updated";
+      else status = "conflict";
+    }
+
+    if (status === "unchanged") {
+      delete entry.pending;
+      unchanged.push({ noteNo: rec.noteNo, title: note.title, source: note.source, related });
+      continue;
+    }
+    if (status === "conflict") {
+      mkdirSync(join(out, "incoming"), { recursive: true });
+      writeFileSync(join(out, "incoming", file), prepared.text);
+      entry.pending = { sourceHash, incoming: `${folderName}/incoming/${file}` };
+      conflicts.push({
+        noteNo: rec.noteNo,
+        title: note.title,
+        local: entry.file,
+        incoming: entry.pending.incoming,
+        folder: note.folder,
+        source: note.source,
+        related,
+      });
+      continue;
+    }
+
+    writeFileSync(join(out, file), prepared.text);
+    ledger.notes[key] = {
+      title: note.title,
+      appleFolder: note.folder,
+      file: `${folderName}/${file}`,
+      importedHash: sha256(Buffer.from(prepared.text, "utf8")),
+      sourceHash,
+      importedAt: new Date().toISOString(),
+    };
+    notes.push({ ...note, status, replaces: status === "updated" ? entry.file : null });
+  }
+  writeLedger(ledgerPath, ledger);
+
+  const selection = {
+    root,
+    selectedAt: new Date().toISOString(),
+    ledger: ledgerPath,
+    folderRules: rules.map(({ pattern, include, origin }) => ({ folder: pattern, action: include ? "include" : "exclude", origin })),
+    notes,
+    unchanged,
+    conflicts,
+    skipped,
+  };
   writeFileSync(join(out, "selection.json"), JSON.stringify(selection, null, 2) + "\n");
 
-  // delete.sh removes the originals of the copied notes: the Markdown file, and the same note in raw/ and html/. It is written now but nothing is removed
-  // until someone runs it, after the import has been reviewed and accepted.
-  const originals = notes.flatMap((n) => [n.source, ...(n.related ?? [])]).filter(Boolean);
+  // delete.sh removes the originals of the notes whose content is in this folder or already imported: the
+  // Markdown file, and the same note in raw/ and html/. A conflict is left alone: Apple Notes has a version
+  // that is not imported yet. Nothing is removed until someone runs it, after the import has been reviewed.
+  const imported = [...notes.filter((n) => n.status === "new" || n.status === "updated"), ...unchanged];
+  const originals = imported.flatMap((n) => [n.source, ...(n.related ?? [])]).filter(Boolean);
   const script = [
     "#!/usr/bin/env bash",
     "# Deletes the original Notes Exporter files of the Toggl notes imported into this folder.",
@@ -176,17 +322,59 @@ function select() {
   writeFileSync(join(out, "delete.sh"), script, { mode: 0o755 });
 
   // data/in/latest points at the newest selection, so the later steps need not know its name.
-  const latest = join(dirname(out), "latest");
+  const latest = join(importRoot, "latest");
   if (existsSync(latest) && !lstatSync(latest).isSymbolicLink()) {
     console.log(`Not updating ${latest}: it is a folder, not a link`);
   } else {
     if (existsSync(latest) || lstatSync(latest, { throwIfNoEntry: false })) unlinkSync(latest);
-    symlinkSync(basename(out), latest);
+    symlinkSync(folderName, latest);
   }
 
+  const count = (status) => notes.filter((n) => n.status === status).length;
   const copied = notes.filter((n) => existsSync(join(out, n.file))).length;
-  console.log(`Selected ${notes.length} Toggl notes, copied ${copied} Markdown files to ${out}`);
+  console.log(
+    `Selected ${notes.length + unchanged.length + conflicts.length} Toggl notes: ${count("new")} new, ${count("updated")} updated, ` +
+      `${unchanged.length} unchanged, ${conflicts.length} changed in Apple Notes but edited here; copied ${copied} Markdown files to ${out}`,
+  );
+  if (conflicts.length) console.log(`Kept ${conflicts.length} local edits; see REPORT.txt for how to decide each one`);
+  if (skipped.length) {
+    const byFolder = new Map();
+    for (const note of skipped) byFolder.set(note.folder, (byFolder.get(note.folder) ?? 0) + 1);
+    const list = [...byFolder].map(([folder, count]) => `${folder || "(no folder)"} (${count})`).join(", ");
+    console.log(`Left out ${skipped.length} Toggl notes in excluded folders: ${list}`);
+  }
   console.log(`Wrote ${join(out, "delete.sh")}; run it only after the import is accepted`);
+}
+
+// keep-local and take-incoming: decide a conflict. --file is the local copy, as the report names it.
+function decideConflict(mode) {
+  const ledgerPath = values.ledger ?? join("data", "in", LEDGER_NAME);
+  if (!values.file) fail(`${command} needs --file LOCAL_COPY`);
+  const importRoot = dirname(resolve(ledgerPath));
+  const ledger = readLedger(ledgerPath);
+  const target = resolve(values.file);
+  const key = Object.keys(ledger.notes).find((item) => resolve(importRoot, ledger.notes[item].file) === target);
+  if (!key) fail(`${values.file} is not an imported copy in ${ledgerPath}`);
+  const entry = ledger.notes[key];
+  if (!entry.pending) fail(`${values.file} has no changed Apple Notes version waiting: nothing to decide`);
+
+  const incoming = resolve(importRoot, entry.pending.incoming);
+  if (mode === "take-incoming") {
+    // The edited copy is kept beside the day, where make import does not read it.
+    const replaced = join(dirname(target), "replaced");
+    mkdirSync(replaced, { recursive: true });
+    copyFileSync(target, join(replaced, basename(target)));
+    copyFileSync(incoming, target);
+    entry.importedHash = sha256(readFileSync(target));
+    console.log(`Replaced ${values.file} with the Apple Notes version; the edited copy is in ${join(replaced, basename(target))}`);
+  } else {
+    console.log(`Kept ${values.file}; the Apple Notes version is accepted as seen`);
+  }
+  entry.sourceHash = entry.pending.sourceHash;
+  delete entry.pending;
+  if (existsSync(incoming)) unlinkSync(incoming);
+  writeLedger(ledgerPath, ledger);
+  console.log(`Run make import IMPORT_DIR=${dirname(target)} to regenerate its JSON`);
 }
 
 function review() {
@@ -194,7 +382,8 @@ function review() {
   if (!out) fail("review needs --out IMPORT_DIR");
   const selectionPath = join(out, "selection.json");
   if (!existsSync(selectionPath)) fail(`no selection.json in ${out}; run select first`);
-  const { notes } = JSON.parse(readFileSync(selectionPath, "utf8"));
+  const { notes, conflicts = [] } = JSON.parse(readFileSync(selectionPath, "utf8"));
+  const importRoot = dirname(out);
 
   const toReview = [];
   const toCategorize = [];
@@ -224,6 +413,24 @@ function review() {
     for (const r of n.reasons) lines.push(`      ${r}`);
   }
   lines.push("");
+  lines.push("");
+  lines.push(`Changed in Apple Notes, local copy kept (${conflicts.length})`);
+  lines.push("The note changed in Apple Notes after it was imported, and its local copy was edited. Nothing was overwritten.");
+  if (conflicts.length === 0) lines.push("  None.");
+  for (const c of conflicts) {
+    const local = join(importRoot, c.local);
+    lines.push(`  - ${c.title || c.noteNo} (${local})`);
+    lines.push(`      Apple Notes version: ${join(importRoot, c.incoming)}`);
+    lines.push(`      keep your edits:  make notes-keep-local FILE=${local}`);
+    lines.push(`      take Apple Notes: make notes-take-incoming FILE=${local}`);
+  }
+  const updated = notes.filter((n) => n.status === "updated");
+  lines.push("");
+  lines.push(`Updated from Apple Notes (${updated.length})`);
+  lines.push("The note changed in Apple Notes and the local copy was not edited, so the new version was imported. The older copy is superseded.");
+  if (updated.length === 0) lines.push("  None.");
+  for (const n of updated) lines.push(`  - ${n.title || n.filename} (${join(out, n.file)}), replaces ${join(importRoot, n.replaces)}`);
+  lines.push("");
   const notices = notes.filter((n) => n.notice);
   lines.push(`Notices (${notices.length})`);
   lines.push("Not errors: the note was imported with the date shown.");
@@ -246,4 +453,6 @@ function review() {
 
 if (command === "select") select();
 else if (command === "review") review();
-else fail("usage: notes-import.mjs select|review --out DIR [--root DIR]");
+else if (command === "keep-local") decideConflict("keep-local");
+else if (command === "take-incoming") decideConflict("take-incoming");
+else fail("usage: notes-import.mjs select --out DIR | review --out DIR | keep-local --file COPY | take-incoming --file COPY");

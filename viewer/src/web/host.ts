@@ -47,11 +47,12 @@ export function describeOutcome(outcome: SyncOutcome): string {
 }
 
 // Runs one sync when a token and an owner are saved. Offline, the changes stay on this device.
+// Every failure, including a failed read of the settings, comes back as a message, never a rejection.
 async function runSync(store: IdbStore, shell: Shell): Promise<{ message: string; isError: boolean }> {
-  const settings = await loadSettings(store);
-  if (!settings.token || !settings.owner) return { message: "Sync is off until you save the owner and a token in Settings.", isError: false };
-  if (!navigator.onLine) return { message: "Offline: changes are kept on this device and sync when you are online.", isError: false };
   try {
+    const settings = await loadSettings(store);
+    if (!settings.token || !settings.owner) return { message: "Sync is off until you save the owner and a token in Settings.", isError: false };
+    if (!navigator.onLine) return { message: "Offline: changes are kept on this device and sync when you are online.", isError: false };
     const remote = githubRepo({ owner: settings.owner, repo: settings.repo, token: settings.token });
     const outcome = await syncDays(syncLocal(store), remote, { device: settings.device, now: new Date() });
     if (outcome.pushed.length || outcome.pulled.length || outcome.conflicts.length) shell.dataChanged();

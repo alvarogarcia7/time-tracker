@@ -1,9 +1,10 @@
 // The browser's storage: the day files, the project database, their old versions, the sync state
 // and the settings, in one IndexedDB database on this device. It implements the same Storage
 // contract as the Node disk storage, so DayService behaves the same in both.
+import { headerDate } from "@core/dayFiles";
 import { sha256Hex } from "@core/hash";
 import type { SyncedState, SyncLocal } from "@core/sync";
-import { DatabaseFile, DayFile, DayFileInfo, DayService, Storage, StoreError } from "@core/workspace";
+import { databaseChanged, DatabaseFile, DayFile, DayFileInfo, DayService, Storage, StoreError } from "@core/workspace";
 
 const DB_NAME = "time-parser";
 const DB_VERSION = 1;
@@ -71,31 +72,35 @@ export class IdbStore implements Storage {
   async listDays(): Promise<DayFileInfo[]> {
     const rows = await request<StoredText[]>(this.db.transaction("days").objectStore("days").getAll());
     return Promise.all(
-      rows.sort(byName).map(async (row) => ({ name: row.name, hash: await sha256Hex(row.text) })),
+      rows
+        .sort(byName)
+        .map(async (row) => ({ name: row.name, hash: await sha256Hex(row.text), date: headerDate(row.text, new Date().getFullYear()) })),
     );
   }
 
   async readDay(name: string): Promise<DayFile | null> {
     const row = await request<StoredText | undefined>(this.db.transaction("days").objectStore("days").get(name));
     if (!row) return null;
-    return { name, text: row.text, hash: await sha256Hex(row.text) };
+    return { name, text: row.text, hash: await sha256Hex(row.text), date: headerDate(row.text, new Date().getFullYear()) };
   }
 
-  // Replaces a day file only while its stored text is still expectedText. The check and the write are one
-  // transaction, so a save made in another tab or during a sync cannot slip in between.
-  private replaceDayIfText(
+  // Replaces a row of the days or database store only while its stored text is still expectedText. The
+  // check and the write are one transaction, so a save made in another tab or during a sync cannot slip
+  // in between.
+  private replaceRowIfText(
+    store: "days" | "database",
     name: string,
     text: string,
     expectedText: string,
   ): Promise<"ok" | "missing" | "changed"> {
     const savedAt = this.now();
     return new Promise((resolve, reject) => {
-      const tx = this.db.transaction(["days", "backups"], "readwrite");
+      const tx = this.db.transaction([store, "backups"], "readwrite");
       let outcome: "ok" | "missing" | "changed" = "ok";
       tx.oncomplete = () => resolve(outcome);
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error ?? new Error("the change was not saved"));
-      const read = tx.objectStore("days").get(name);
+      const read = tx.objectStore(store).get(name);
       read.onerror = () => reject(read.error);
       read.onsuccess = () => {
         const row = read.result as StoredText | undefined;
@@ -107,7 +112,7 @@ export class IdbStore implements Storage {
           outcome = "changed";
           return;
         }
-        tx.objectStore("days").put({ name, text, updated: savedAt } satisfies StoredText);
+        tx.objectStore(store).put({ name, text, updated: savedAt } satisfies StoredText);
         if (expectedText !== text) {
           tx.objectStore("backups").add({ name, text: expectedText, savedAt } satisfies StoredBackup);
         }
@@ -117,7 +122,7 @@ export class IdbStore implements Storage {
 
   async writeDay(name: string, text: string, previous: DayFile): Promise<{ hash: string }> {
     const hash = await sha256Hex(text);
-    const outcome = await this.replaceDayIfText(name, text, previous.text);
+    const outcome = await this.replaceRowIfText("days", name, text, previous.text);
     if (outcome === "missing") throw new StoreError(404, `${name}: not found in the editor folder`);
     if (outcome === "changed") {
       throw new StoreError(409, `${name} changed on disk since it was opened; reload it before saving`);
@@ -127,7 +132,14 @@ export class IdbStore implements Storage {
 
   // Replaces a day file with text when it still reads as expectedText (used by the sync).
   async replaceDayUnlessChanged(name: string, text: string, expectedText: string): Promise<boolean> {
-    return (await this.replaceDayIfText(name, text, expectedText)) === "ok";
+    return (await this.replaceRowIfText("days", name, text, expectedText)) === "ok";
+  }
+
+  // Removes a day file (only used for a conflict copy this sync created, before it was sent).
+  async deleteDay(name: string): Promise<void> {
+    await transact(this.db, ["days"], (tx) => {
+      tx.objectStore("days").delete(name);
+    });
   }
 
   // A new day file. An existing file of the same name is never replaced (the store refuses it).
@@ -152,15 +164,12 @@ export class IdbStore implements Storage {
     return { text: row.text, hash: await sha256Hex(row.text) };
   }
 
+  // Saves the database only while its stored text is still previous.text (one transaction, as for days).
   async writeDatabase(text: string, previous: DatabaseFile): Promise<{ hash: string }> {
     const hash = await sha256Hex(text);
-    const savedAt = this.now();
-    await transact(this.db, ["database", "backups"], (tx) => {
-      tx.objectStore("database").put({ name: DATABASE_NAME, text, updated: savedAt } satisfies StoredText);
-      if (previous.text !== text) {
-        tx.objectStore("backups").add({ name: DATABASE_NAME, text: previous.text, savedAt } satisfies StoredBackup);
-      }
-    });
+    const outcome = await this.replaceRowIfText("database", DATABASE_NAME, text, previous.text);
+    if (outcome === "missing") throw new StoreError(404, "no project database");
+    if (outcome === "changed") throw databaseChanged(this.databaseLabel);
     return { hash };
   }
 
@@ -241,6 +250,7 @@ export function syncLocal(store: IdbStore): SyncLocal {
       return { text: file.text };
     },
     write: (name, text, expectedText) => store.replaceDayUnlessChanged(name, text, expectedText),
+    remove: (name) => store.deleteDay(name),
     async create(name, text) {
       await store.createDay(name, text);
     },

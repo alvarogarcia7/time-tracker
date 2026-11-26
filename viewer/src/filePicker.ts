@@ -5,7 +5,8 @@ import { el } from "./dom";
 export interface FilePicker {
   element: HTMLElement;
   // The files to offer, and the one that is chosen now (shown in the box when it is not being typed in).
-  setFiles(names: string[], selected: string | null): void;
+  // failed: the names among them that did not parse, marked "has errors".
+  setFiles(names: string[], selected: string | null, failed?: string[]): void;
 }
 
 export function filePicker(choose: (name: string) => void): FilePicker {
@@ -26,6 +27,7 @@ export function filePicker(choose: (name: string) => void): FilePicker {
   list.setAttribute("role", "listbox");
 
   let names: string[] = [];
+  let failedNames = new Set<string>();
   let selected: string | null = null;
   let shown: string[] = [];
   let highlight = -1;
@@ -50,6 +52,7 @@ export function filePicker(choose: (name: string) => void): FilePicker {
     list.replaceChildren();
     for (const name of shown) {
       const item = el("li", "suggestion", name);
+      if (failedNames.has(name)) item.append(el("span", "muted", " has errors"));
       item.setAttribute("role", "option");
       item.addEventListener("mousedown", (event) => {
         event.preventDefault(); // keep the focus until the file is chosen
@@ -102,8 +105,9 @@ export function filePicker(choose: (name: string) => void): FilePicker {
   wrap.append(input, toggle, list);
   return {
     element: wrap,
-    setFiles(next, current) {
+    setFiles(next, current, failed = []) {
       names = next;
+      failedNames = new Set(failed);
       selected = current;
       if (document.activeElement !== input) input.value = current ?? "";
     },

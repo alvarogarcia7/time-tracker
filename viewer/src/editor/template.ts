@@ -20,6 +20,7 @@ export const EDITOR_TEMPLATE = `
 </header>
 <div>
   <section id="entries-section">
+    <p class="hint muted small">An entry ends where the next line starts. The last entry stays open.</p>
     <div class="filters">
       <label>Category
         <select id="filter-category">

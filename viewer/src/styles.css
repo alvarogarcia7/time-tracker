@@ -269,7 +269,8 @@ main { padding: 16px; }
   font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   resize: vertical;
 }
-.entry-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+#entries { overflow-x: auto; max-width: 100%; }
+.entry-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
 .entry-table th, .entry-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
 .entry-table th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .entry-table td.num { text-align: right; white-space: nowrap; }
@@ -282,6 +283,9 @@ main { padding: 16px; }
 .combo { position: relative; min-width: 120px; }
 .combo input { width: 100%; padding: 4px 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; }
 .combo input:focus { border-color: var(--accent); background: var(--surface); outline: none; }
+.project-cell .combo input { padding-right: 22px; }
+.project-cell input::placeholder { color: var(--muted); }
+.project-cell .caret { position: absolute; right: 7px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
 .suggestions {
   position: absolute;
   top: 100%;
@@ -299,6 +303,8 @@ main { padding: 16px; }
   box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
 }
 .suggestion { padding: 5px 10px; cursor: pointer; white-space: nowrap; }
+.suggestion.disabled { opacity: .45; cursor: default; }
+.suggestion.disabled .muted { opacity: 1; }
 .file-picker { position: relative; }
 .file-picker input { width: 240px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
 .file-picker .suggestions { min-width: 240px; }

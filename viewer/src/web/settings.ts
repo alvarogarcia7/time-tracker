@@ -142,8 +142,12 @@ export function mountSettings(store: IdbStore): SettingsMount {
 
     byId<HTMLButtonElement>("set-sync").addEventListener("click", async () => {
       say(status, "Syncing...");
-      const result = await syncNow(store, shell);
-      say(status, result.message, result.isError);
+      try {
+        const result = await syncNow(store, shell);
+        say(status, result.message, result.isError);
+      } catch (err) {
+        say(status, `Sync failed: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
     });
 
     byId<HTMLButtonElement>("set-forget").addEventListener("click", async () => {

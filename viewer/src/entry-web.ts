@@ -24,11 +24,19 @@ async function start(): Promise<void> {
   // Sync on open, and again when the connection comes back. iOS has no background sync, so the page
   // does it only while it is open.
   const sync = async () => {
-    const result = await syncNow(store, shell);
-    if (result.message.startsWith("Synced") || result.isError) showNotice(result.message);
+    try {
+      const result = await syncNow(store, shell);
+      if (result.message.startsWith("Synced") || result.isError) showNotice(result.message);
+    } catch (err) {
+      showNotice(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
   window.addEventListener("online", () => void sync());
-  if ((await loadSettings(store)).token) void sync();
+  try {
+    if ((await loadSettings(store)).token) void sync();
+  } catch (err) {
+    showNotice(`Could not read the settings: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 void start();

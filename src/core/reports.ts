@@ -131,6 +131,21 @@ export function loadDatabase(text: string, source = "projects.yml"): Database {
   return db;
 }
 
+// Why a new project cannot be added to the database, in words for the form; null when it can.
+// Keywords are compared without case, as the parser matches them.
+export function newProjectProblem(db: Database, name: string, keywords: string[]): string | null {
+  if (db.has(name)) return `A project named ${name} already exists`;
+  for (const word of keywords) {
+    const wanted = word.toLowerCase();
+    for (const project of db.values()) {
+      if (project.keywords.some((known) => known.toLowerCase() === wanted)) {
+        return `Keyword ${word} is already used by ${project.name}`;
+      }
+    }
+  }
+  return null;
+}
+
 // ---- records ----------------------------------------------------------------
 
 export interface LoadedDay {
@@ -152,7 +167,7 @@ export function recordsFromFiles(files: LoadedDay[], db: Database): { records: E
       }
       doc = validate(parsed);
     } catch {
-      skipped.push(`${file.name}: not JSON`);
+      skipped.push(/\.md$/i.test(file.name) ? `${file.name}: Reports needs JSON` : `${file.name}: not JSON`);
       continue;
     }
     if (typeof doc.date !== "string" || !DAY_RE.test(doc.date)) {
@@ -254,6 +269,14 @@ function selected(record: EntryRecord, filters: Filters): boolean {
   }
   // Uncategorised projects are kept whatever the category filter is.
   return filters.category === undefined || record.category === filters.category || record.category === null;
+}
+
+// The range as the Reports controls give it: From and To as typed, not the days in the data.
+export function rangeLabel(from: string | null, to: string | null): string {
+  if (from && to) return `${from} to ${to}`;
+  if (from) return `from ${from}`;
+  if (to) return `to ${to}`;
+  return "no range chosen";
 }
 
 export function buildReport(records: EntryRecord[], period: Period, filters: Filters = {}, skipped: string[] = []): Report {

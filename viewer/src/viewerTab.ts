@@ -17,6 +17,7 @@ import {
   validate,
 } from "@core/summary";
 import { addDays, localDay } from "@core/reports";
+import { dayListEntries } from "@core/dayFiles";
 import { mondayOf, summarizeWeek } from "@core/week";
 import type { Controller, DaysResult, Shell } from "./shell";
 import { dot, el } from "./dom";
@@ -386,19 +387,21 @@ export function mountViewer(root: HTMLElement, shell: Shell): Controller {
 
   const listDays = async (): Promise<void> => {
     const days = byId("days");
-    let files: { name: string }[] = [];
+    let entries: { name: string; failed: boolean }[] = [];
     try {
-      files = (await shell.days()).files;
+      const result = await shell.days();
+      entries = dayListEntries(result.files, result.errors);
     } catch {
-      files = [];
+      entries = [];
     }
-    if (!files.length) {
+    if (!entries.length) {
       days.classList.add("hidden");
       return;
     }
     picker.setFiles(
-      files.map((file) => file.name),
+      entries.map((entry) => entry.name),
       shell.selectedFile(),
+      entries.filter((entry) => entry.failed).map((entry) => entry.name),
     );
     days.classList.remove("hidden");
   };

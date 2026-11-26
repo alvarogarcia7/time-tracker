@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Server } from "node:http";
 
-import { createEditorServer, Workspace } from "../src/node/editorServer";
+import { createEditorServer, DiskStorage, Workspace } from "../src/node/editorServer";
+import { DayService, StoreError } from "../src/core/workspace";
 
 const DAY = "#toggl 11/11\n- [ ] 0800 X\n- [ ] 0900 gym\n- [ ] \n";
 const PROJECTS = "gym:\n  category: personal\n  keywords: [gym]\nlost: [lost]\n";
@@ -68,6 +69,7 @@ describe("editor server", () => {
 
     assert.deepEqual(data.files.map((f: { name: string }) => f.name), ["11-11.md"]);
     assert.equal(data.files[0].hash, digest(DAY));
+    assert.match(data.files[0].date, /^\d{4}-11-11$/); // the header's day, with the current year
   });
 
   test("a file can be read", async () => {
@@ -254,6 +256,71 @@ describe("editor server", () => {
       assert.equal(created.status, 404);
     } finally {
       plain.close();
+    }
+  });
+});
+
+// A second tab saves the database between this tab's read and its write, which is the window a
+// stale save used to slip through.
+class OtherTabSaves extends DiskStorage {
+  armed = false;
+
+  constructor(
+    folder: string,
+    private readonly file: string,
+    private readonly newer: string,
+    backups: string,
+  ) {
+    super(folder, file, backups);
+  }
+
+  override async readDatabase() {
+    const database = await super.readDatabase();
+    if (this.armed) {
+      this.armed = false;
+      writeFileSync(this.file, this.newer);
+    }
+    return database;
+  }
+}
+
+describe("a database save made from a stale copy", () => {
+  const OLD = "gym:\n  category: personal\n  keywords: [gym]\n";
+  const NEWER = OLD + "work:\n  category: professional\n  keywords: [client]\n";
+
+  function setup(): { root: string; db: string; storage: OtherTabSaves } {
+    const root = mkdtempSync(join(tmpdir(), "tp-stale-db-"));
+    const db = join(root, "projects.yml");
+    writeFileSync(db, OLD);
+    const storage = new OtherTabSaves(root, db, NEWER, join(root, "backups"));
+    return { root, db, storage };
+  }
+
+  test("a save is refused when another tab saves in between, and the newer text is kept", async () => {
+    const { root, db, storage } = setup();
+    try {
+      storage.armed = true;
+      await assert.rejects(
+        new DayService(storage).saveProjects(OLD + "fitness:\n  keywords: [run]\n", digest(OLD)),
+        (err: unknown) => err instanceof StoreError && err.status === 409,
+      );
+      assert.equal(readFileSync(db, "utf-8"), NEWER);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a new project is refused when another tab saves in between, and the newer text is kept", async () => {
+    const { root, db, storage } = setup();
+    try {
+      storage.armed = true;
+      await assert.rejects(
+        new DayService(storage).createProject("lunch"),
+        (err: unknown) => err instanceof StoreError && err.status === 409,
+      );
+      assert.equal(readFileSync(db, "utf-8"), NEWER);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

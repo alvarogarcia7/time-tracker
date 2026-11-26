@@ -98,7 +98,7 @@ The side that is a project keyword gives the project (matched ignoring case, a w
 - **References**: a description that is only a time (`8`) takes the description of the nearest earlier entry starting at that time.
 - **Projects**: a YAML mapping of project name to keywords. Keywords match whole words, ignoring case.
   - A keyword belongs to one project only. Listing the same keyword under two projects (ignoring case and surrounding spaces) is an error.
-  - An entry whose description matches keywords of two different projects is an error, naming the line.
+  - An entry whose description matches keywords of two unrelated projects is an error, naming the line. Projects in one line of descent are not unrelated (see Hierarchy below).
   - An entry that matches no keyword is `unknown`, which is reserved and cannot be a project name.
 - Empty placeholder tasks (`- [ ]`) are ignored. The last entry has `end: null`.
 
@@ -153,7 +153,9 @@ client-b:api-review:
   keywords: ["API review"]
 ```
 
-Names can be hierarchical (`a:b:c`). The older form, keywords only, still loads. `tests/fixtures/sample/projects.yml` is a categorised example.
+Names can be hierarchical (`a:b:c`). The older form, keywords only, still loads.
+
+Hierarchy: a project named `a:b` is below `a`, and a keyword of `a` also matches `a:b`. When several projects match, the deepest one wins, and a project matched by its own keyword beats one matched only through its parent at the same depth. So with `car` (keyword `car`) and `car:maintainance` (keyword `car:maintainance`), `car`, `car wash` and `car: wash` are all `car:maintainance`. Two projects that are not in one line of descent (`gym` and `car:maintainance` matching the same description) is still an error. A description that is exactly a keyword is matched as a whole first, so a keyword with a colon is not split. `tests/fixtures/sample/projects.yml` is a categorised example.
 
 Projects in the time entries that are not registered are added to the same file as comments, between two marker lines. Uncomment one to accept it, rename it if needed, and add a category. Each suggestion lists its keywords one per line. `make sync-projects` only adds: it never changes or removes a line, and skips a project whose name or keyword is already in the file.
 
@@ -260,7 +262,10 @@ Imports the Toggl notes exported by [Notes Exporter](https://github.com/storizzi
 ```
 make notes-sync      # clones Notes Exporter if needed and runs zsh exportnotes.zsh -m
 make notes-select    # copies the Toggl notes to data/in/YYYY-MM-DD-HH_MM_SS and writes its delete.sh
+                     # NOTES_SELECT_ARGS='--exclude Work --include Work/Projects' chooses folders
 make notes-import-review-commit   # converts the newest data/in folder, prints what to review and
                                  # to categorize (REPORT.txt), and commits the folder
 bash data/in/<folder>/delete.sh  # only when the import is accepted: deletes the original notes
-`notes-select` takes the export from `NOTES_EXPORT_ROOT_DIR` (default `~/Downloads/AppleNotesExport`). It selects the notes whose file name or title contains "toggl" (ignoring case). The date is read from the first line of each Markdown file (`6/5`, `6-5`, `6.5`, with or without a year), and falls back to the creation date. A file is listed for review when that date differs from the creation date, or when it cannot be converted. A file is listed for categorizing when an entry has no project. The report is also saved as `REPORT.txt` in the import folder. `notes-select` deletes nothing: it writes `delete.sh`, which removes the original files of the selected notes: the Markdown file, and the same note in `raw/` and `html/` when those exist, and you run it yourself once you have accepted the import. `notes-import-review-commit` uses the newest folder in `data/in` unless you pass `IMPORT_DIR=`.
+`notes-select` takes the export from `NOTES_EXPORT_ROOT_DIR` (default `~/Downloads/AppleNotesExport`). It selects the notes whose file name or title contains "toggl" (ignoring case), in every folder except the excluded ones. The folder is the note's subdirectory in the export (`iCloud-Work`, or `Work/Projects` with a nested layout). `--exclude FOLDER` leaves a folder out, `--include FOLDER` takes it back, and a folder name also covers its subfolders; the later and more specific rule wins. `iCloud-Recently-Deleted` is excluded by default. The notes left out are listed in the output and in `selection.json`. The date is read from the first line of each Markdown file (`6/5`, `6-5`, `6.5`, with or without a year), and falls back to the creation date. A file is listed for review when that date differs from the creation date, or when it cannot be converted. A file is listed for categorizing when an entry has no project. The report is also saved as `REPORT.txt` in the import folder. Importing a note again is safe: `data/in/imports.json` records each imported note, so a note that did not change in Apple Notes is skipped, and a changed one replaces its copy only when that copy was not edited. An edited copy is kept, and the Apple Notes version waits in `incoming/`; `make notes-keep-local FILE=...` or `make notes-take-incoming FILE=...` decides it. See [docs/notes-import.md](docs/notes-import.md).
+
+`notes-select` deletes nothing: it writes `delete.sh`, which removes the original files of the selected notes: the Markdown file, and the same note in `raw/` and `html/` when those exist, and you run it yourself once you have accepted the import. `notes-import-review-commit` uses the newest folder in `data/in` unless you pass `IMPORT_DIR=`.

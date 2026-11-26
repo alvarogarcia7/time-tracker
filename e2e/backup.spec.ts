@@ -106,3 +106,24 @@ test("a conflict copy of the project database is listed in Settings, exported, a
   await expect(listed).toHaveCount(0);
   await expect(page.locator("#copies-empty")).toBeVisible();
 });
+
+test("a storage error during Sync now shows the error, not Syncing...", async ({ page }) => {
+  // Reads of the settings store fail once the test turns the fault on.
+  await page.addInitScript(() => {
+    const get = IDBObjectStore.prototype.get;
+    IDBObjectStore.prototype.get = function (this: IDBObjectStore, ...args: [IDBValidKey | IDBKeyRange]) {
+      if ((window as unknown as { __failSettingsReads?: boolean }).__failSettingsReads && this.name === "settings") {
+        throw new DOMException("injected storage failure", "UnknownError");
+      }
+      return get.apply(this, args);
+    } as typeof get;
+  });
+  await openApp(page);
+  await page.getByRole("tab", { name: "Settings" }).click();
+  await page.evaluate(() => {
+    (window as unknown as { __failSettingsReads?: boolean }).__failSettingsReads = true;
+  });
+  await page.getByRole("button", { name: "Sync now", exact: true }).click();
+  await expect(page.locator("#set-status")).toContainText("Sync failed: injected storage failure");
+  await expect(page.locator("#set-status")).not.toHaveText("Syncing...");
+});

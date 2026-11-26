@@ -96,6 +96,9 @@ class MemoryLocal implements SyncLocal {
     if (this.days.has(name)) throw new Error(`${name}: exists`);
     this.days.set(name, text);
   }
+  async remove(name: string) {
+    this.days.delete(name);
+  }
   async synced() {
     return new Map(this.state);
   }
@@ -241,6 +244,33 @@ describe("sync of the day files", () => {
     assert.equal(laptop.days.get("2026-11-25.md"), DAY + "- [ ] 1300 phone edit\n");
     assert.equal(laptop.days.get(copy), DAY + "- [ ] 1400 saved during sync\n");
     assert.equal(gh.files.get(copy)?.text, DAY + "- [ ] 1400 saved during sync\n");
+  });
+
+  test("a failed conditional write leaves no stray copy", async () => {
+    const gh = new FakeGitHub();
+    const phone = new MemoryLocal();
+    // The laptop's file changes again right after its copy is made, so the write that replaces the file fails.
+    class Racing extends MemoryLocal {
+      override async create(name: string, text: string) {
+        await super.create(name, text);
+        if (name.includes(".conflict-")) this.days.set("2026-11-25.md", DAY + "- [ ] 1500 typed while copying\n");
+      }
+    }
+    const laptop = new Racing();
+    phone.days.set("2026-11-25.md", DAY);
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+    laptop.days.set("2026-11-25.md", DAY + "- [ ] 1200 laptop edit\n");
+    phone.days.set("2026-11-25.md", DAY + "- [ ] 1300 phone edit\n");
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+
+    const outcome = await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+    assert.deepEqual(outcome.conflicts, []);
+    assert.equal(outcome.errors.length, 1);
+    assert.equal(outcome.errors[0].name, "2026-11-25.md");
+    assert.deepEqual([...laptop.days.keys()], ["2026-11-25.md"]);
+    assert.equal(laptop.days.get("2026-11-25.md"), DAY + "- [ ] 1500 typed while copying\n");
+    assert.deepEqual([...gh.files.keys()], ["2026-11-25.md"]);
   });
 
   test("the conflict copy name is safe and never reuses a taken name", () => {

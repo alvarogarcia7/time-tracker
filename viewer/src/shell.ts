@@ -2,6 +2,7 @@
 // come from an EditorApi: over HTTP when the Node server serves the page, or from the browser's
 // own storage when the page is the installed web app.
 import type { TimeEntryDay } from "@core/summary";
+import { urlWithFile } from "@core/dayFiles";
 import { EditorApi, StoreError } from "@core/workspace";
 
 export type TabName = "editor" | "viewer" | "reports" | "projects" | "settings";
@@ -54,6 +55,11 @@ export function createShell(api: EditorApi): Shell {
     selectedFile: () => selected,
     selectFile(name) {
       selected = name;
+      try {
+        history.replaceState(history.state, "", urlWithFile(location.href, name));
+      } catch {
+        // A page without history or a URL (a preview) still shows the file; only a refresh loses it.
+      }
       // Listeners read selectedFile() rather than a value passed in, so a change made inside one
       // listener (the editor putting back the file it still has open) is seen by the rest.
       for (const listener of listeners) listener();
@@ -84,3 +90,4 @@ export function createShell(api: EditorApi): Shell {
     openTab: () => undefined,
   };
 }
+

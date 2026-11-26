@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseDescription, Projects, replaceKeyword } from "../src/core/description";
+import { detectProject, parseDescription, Projects, replaceKeyword } from "../src/core/description";
 import { TimeParseError } from "../src/core/errors";
 import { parseDay } from "../src/core/parser";
 
@@ -112,4 +112,46 @@ test("replaceKeyword changes the keyword side and keeps the separator and the ta
   assert.equal(replaceKeyword("wash dishes,  kitchen ", last, "gym"), "wash dishes,  gym ");
   const none = parseDescription("walking", PROJECTS);
   assert.equal(replaceKeyword("walking", none, "gym"), "walking");
+});
+
+// ---- hierarchy: a keyword of a project also matches the projects below it ------------
+
+const CAR: Projects = new Map([
+  ["car:maintainance", ["car:maintainance"]],
+  ["car", ["car"]],
+]);
+
+test("a keyword of a parent project matches the child, and the deepest project wins", () => {
+  assert.equal(detectProject("car", CAR), "car:maintainance");
+  assert.equal(detectProject("car wash", CAR), "car:maintainance");
+  assert.equal(parseDescription("car: wash", CAR).project, "car:maintainance");
+  assert.equal(parseDescription("wash, car", CAR).project, "car:maintainance");
+});
+
+test("a keyword with a colon matches the whole description, not its first part", () => {
+  const parts = parseDescription("car:maintainance", CAR);
+
+  assert.equal(parts.project, "car:maintainance");
+  assert.equal(parts.task, "car:maintainance");
+});
+
+test("unrelated projects that both match are still an error", () => {
+  const projects: Projects = new Map([
+    ["gym", ["gym"]],
+    ["car:maintainance", ["car:maintainance"]],
+    ["car", ["car"]],
+  ]);
+
+  assert.throws(() => detectProject("gym car", projects), /matches several projects/);
+});
+
+test("two children of the same parent that both match are an error", () => {
+  const projects: Projects = new Map([
+    ["car", ["car"]],
+    ["car:a", ["a"]],
+    ["car:b", ["b"]],
+  ]);
+
+  assert.throws(() => detectProject("car a b", projects), /matches several projects/);
+  assert.equal(detectProject("car a", projects), "car:a");
 });

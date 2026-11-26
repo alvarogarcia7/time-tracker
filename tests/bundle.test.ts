@@ -17,6 +17,25 @@ describe("export bundle", () => {
     assert.deepEqual(again.projects, PROJECTS);
   });
 
+  test("a projects entry that is not projects.yml is refused, so no database copy is planned", () => {
+    const bundle = {
+      format: BUNDLE_FORMAT,
+      version: 1,
+      exported: NOW.toISOString(),
+      days: [],
+      projects: { name: "notes.txt", text: "gym: [gym]\n", updated: NOW.toISOString() },
+      projectCopies: [],
+    };
+    assert.throws(() => parseBundle(JSON.stringify(bundle)), /not the project database \(projects\.yml\)/);
+  });
+
+  test("a database copy with a folder part or the database's own name is refused", () => {
+    for (const name of ["../projects.conflict-x.yml", "sub/projects.conflict-x.yml", "projects.yml", "notes.txt"]) {
+      const bundle = { format: BUNDLE_FORMAT, version: 1, exported: NOW.toISOString(), days: [], projects: null, projectCopies: [{ name, text: "", updated: NOW.toISOString() }] };
+      assert.throws(() => parseBundle(JSON.stringify(bundle)), /not a project database name/, name);
+    }
+  });
+
   test("a file that is not an export is refused with the reason", () => {
     assert.throws(() => parseBundle("not json"), /not JSON/);
     assert.throws(() => parseBundle('{"format":"other"}'), /not a time-parser export/);

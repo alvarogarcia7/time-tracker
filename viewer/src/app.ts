@@ -41,7 +41,8 @@ export function startPage(api: EditorApi, settings?: SettingsMount): Shell {
       panel(name).classList.toggle("hidden", !showing);
       document.querySelector(`[data-tab="${name}"][role="tab"]`)?.setAttribute("aria-selected", String(showing));
     }
-    history.replaceState(null, "", `#${tab}`);
+    // The tab goes in the hash; the file in ?name= stays, so a refresh opens it again.
+    history.replaceState(null, "", `${location.pathname}${location.search}#${tab}`);
     controllers[tab].show();
   };
   shell.openTab = select;

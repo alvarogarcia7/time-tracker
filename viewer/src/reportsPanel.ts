@@ -17,6 +17,7 @@ import {
   localDay,
   loadDatabase,
   presetRange,
+  rangeLabel,
   recordsFromFiles,
 } from "@core/reports";
 
@@ -72,7 +73,7 @@ function bar(percent: number, color: string): HTMLElement {
   return track;
 }
 
-function renderReport(report: Report): HTMLElement {
+function renderReport(report: Report, range: string): HTMLElement {
   const wrap = el("div", "report");
   const totals = report.totals;
   const scope: string[] = [];
@@ -92,9 +93,8 @@ function renderReport(report: Report): HTMLElement {
     box.append(el("div", "stat-value", value), el("div", "stat-label", label));
     summary.append(box);
   }
-  const span = report.from ? `${report.from} to ${report.to}` : "no entries";
   wrap.append(
-    el("p", "muted", `${report.period} · ${span} · ${scope.length ? scope.join(" · ") : "all projects"}`),
+    el("p", "muted", `${report.period} · ${range} · ${scope.length ? scope.join(" · ") : "all projects"}`),
     summary,
   );
 
@@ -338,7 +338,7 @@ export function mountReports(root: HTMLElement, shell: Shell): Controller {
         },
         skipped,
       );
-      result.append(renderReport(report));
+      result.append(renderReport(report, rangeLabel(fromInput.value || null, toInput.value || null)));
     } catch (err) {
       const box = el("div", "error", err instanceof Error ? err.message : String(err));
       result.append(box);
@@ -365,7 +365,16 @@ export function mountReports(root: HTMLElement, shell: Shell): Controller {
 
   dayInput.addEventListener("change", async () => {
     if (!dayInput.files) return;
-    state.files = await readFiles(dayInput.files);
+    const picked = await readFiles(dayInput.files);
+    // A .md file is not loaded: Reports needs the JSON day files, and the file is not counted.
+    const markdown = picked.filter((file) => /\.md$/i.test(file.name));
+    state.files = picked.filter((file) => !/\.md$/i.test(file.name));
+    state.errors = markdown.map((file) => `${file.name}: Reports needs JSON`);
+    if (!state.files.length && markdown.length) {
+      status.textContent = "";
+      result.replaceChildren(el("div", "error", "Reports needs JSON"));
+      return;
+    }
     run();
   });
 

@@ -1,5 +1,6 @@
 // The web editor page: a plain text view, and an entries view with dropdowns.
-import { formatMinutes } from "@core/summary";
+import { chooseDayFile, dayWithWeekday, localDay, shortcutFiles } from "@core/dayFiles";
+import { formatMinutes, UNKNOWN_PROJECT } from "@core/summary";
 import { Database, detectProjectInDb, loadDatabase } from "@core/reports";
 import type { TimeEntryDay } from "@core/summary";
 import type { Controller, Shell } from "../shell";
@@ -13,18 +14,31 @@ import {
   headerIndex,
   matchesFilters,
   insertAfter,
+  insertForTyping,
+  endChangeNotice,
+  noDayFileNotice,
+  addEntryLabel,
+  PROJECT_PLACEHOLDER,
+  timeCellText,
+  TIME_HEADER_HINT,
+  reloadPrompt,
+  savedNotice,
+  isUnsaved,
+  statusLead,
   joinLines,
   timeAfter,
   removeLine,
   setLine,
   setTask,
   splitLines,
+  verifyProjectChange,
   withProject,
 } from "@core/editorModel";
 
 interface FileInfo {
   name: string;
   hash: string;
+  date: string | null;
 }
 
 interface DayEntry {
@@ -100,8 +114,31 @@ function statusOf(err: unknown): number {
   return err instanceof StoreError ? err.status : 0;
 }
 
+// A cell box holds typed text that is not committed yet (set on each keystroke, cleared on commit or discard).
+let typedPending = false;
+
+// Tab and Enter in a cell move to the next field of the row, in this order.
+const CELL_ORDER = ["time", "description", "project", "add"];
+// The field that gets focus when the table is drawn again: a commit redraws the table.
+let focusAfterRender: { line: number; column: string } | null = null;
+
+// The target is kept while focus is lost (the page or a removed box has it): a parse redraws the table
+// a moment after a commit. Focus on anything else ends it.
+function restoreFocus(): void {
+  const target = focusAfterRender;
+  if (!target) return;
+  const cell = state.view === "entries" ? byId("entries").querySelector<HTMLElement>(`tr[data-line="${target.line}"] [data-col="${target.column}"]`) : null;
+  const field = cell ? cell.querySelector<HTMLElement>("input") ?? cell : null;
+  const active = document.activeElement;
+  if (!field || (active && active !== document.body && active !== field)) {
+    focusAfterRender = null;
+    return;
+  }
+  field.focus();
+}
+
 function dirty(): boolean {
-  return state.text !== state.saved;
+  return isUnsaved(state.text, state.saved, typedPending);
 }
 
 function confirmDiscard(): boolean {
@@ -119,7 +156,8 @@ function setFileInput(name: string): void {
 function wireFilePicker(): void {
   const input = byId("editor-file") as HTMLInputElement;
   const list = byId("file-list");
-  let shown: string[] = [];
+  // The shortcuts come first, then the files. A shortcut with no file (no file for today) is greyed out.
+  let shown: PickerOption[] = [];
   let highlight = -1;
   let navigated = false;
 
@@ -129,33 +167,53 @@ function wireFilePicker(): void {
     highlight = -1;
   };
   const paint = () => Array.from(list.children).forEach((node, index) => node.classList.toggle("active", index === highlight));
+  // The next enabled option from index in direction step (1 or -1), wrapping around; -1 when none is enabled.
+  const nextEnabled = (from: number, step: number): number => {
+    for (let count = 1; count <= shown.length; count++) {
+      const index = (from + step * count + shown.length * count) % shown.length;
+      if (!shown[index].disabled) return index;
+    }
+    return -1;
+  };
+
+  let choosing = false; // set while a file is being chosen, so the blur below does not report a name
 
   const choose = (name: string) => {
     hide();
+    state.notice = null; // a message from a failed typed name no longer applies
+    renderStatus();
+    choosing = true;
     input.blur();
+    choosing = false;
     if (name === state.name) setFileInput(state.name);
     else void open(name);
   };
 
   const refresh = (showAll: boolean) => {
     const typed = showAll ? "" : input.value.trim().toLowerCase();
-    shown = state.files.map((file) => file.name).filter((name) => !typed || name.toLowerCase().includes(typed));
+    shown = pickerOptions(new Date()).filter((option) => !typed || option.label.toLowerCase().includes(typed));
     list.replaceChildren();
-    for (const name of shown) {
-      const item = el("li", "suggestion", name);
+    for (const option of shown) {
+      const item = el("li", option.disabled ? "suggestion disabled" : "suggestion");
+      item.append(option.label);
+      if (option.detail) item.append(el("span", "muted", ` ${option.detail}`));
       item.setAttribute("role", "option");
+      item.setAttribute("aria-disabled", String(option.disabled));
       item.addEventListener("mousedown", (event) => {
         event.preventDefault(); // keep the focus until the file is chosen
-        choose(name);
+        if (!option.disabled && option.file) choose(option.file);
       });
       list.append(item);
     }
-    highlight = shown.length ? 0 : -1;
+    highlight = nextEnabled(-1, 1);
     navigated = false;
     list.classList.toggle("hidden", shown.length === 0);
     input.setAttribute("aria-expanded", String(shown.length > 0));
     paint();
   };
+
+  // The files the list shows for the typed text (shortcuts count when they name a file).
+  const matchingFiles = () => shown.filter((option) => option.file !== null).length;
 
   input.addEventListener("focus", () => {
     input.select();
@@ -164,22 +222,33 @@ function wireFilePicker(): void {
   input.addEventListener("input", () => refresh(false));
   input.addEventListener("blur", () => {
     hide();
+    // Tab on a name that matches no file: the box goes back to the open file, and says why.
+    const notice = !choosing && input.value.trim() !== state.name ? noDayFileNotice(input.value, matchingFiles()) : null;
     setFileInput(state.name);
+    if (notice) showStatus(notice, true);
   });
   input.addEventListener("keydown", (event) => {
     if ((event.key === "ArrowDown" || event.key === "ArrowUp") && shown.length) {
       event.preventDefault();
-      highlight = (highlight + (event.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length;
-      navigated = true;
-      paint();
+      const next = nextEnabled(highlight < 0 ? -1 : highlight, event.key === "ArrowDown" ? 1 : -1);
+      if (next >= 0) {
+        highlight = next;
+        navigated = true;
+        paint();
+      }
     } else if (event.key === "Enter") {
       event.preventDefault();
       const typed = input.value.trim().toLowerCase();
-      const exact = shown.find((name) => name.toLowerCase() === typed);
-      const only = shown.length === 1 ? shown[0] : undefined;
+      const enabled = shown.filter((option) => !option.disabled);
+      const exact = shown.find((option) => option.label.toLowerCase() === typed);
+      const only = enabled.length === 1 ? enabled[0] : undefined;
       const pick = exact ?? only ?? (navigated && highlight >= 0 ? shown[highlight] : undefined);
-      if (pick !== undefined) choose(pick);
-      else setFileInput(state.name);
+      if (pick?.file && !pick.disabled) choose(pick.file);
+      else {
+        const notice = noDayFileNotice(input.value, matchingFiles());
+        setFileInput(state.name);
+        if (notice) showStatus(notice, true);
+      }
     } else if (event.key === "Escape") {
       setFileInput(state.name);
       input.blur();
@@ -187,11 +256,30 @@ function wireFilePicker(): void {
   });
 }
 
+// What the picker offers: the last file and today's file (greyed out when there is none), then every file.
+interface PickerOption {
+  label: string;
+  detail: string | null; // the file the shortcut names, shown beside it
+  file: string | null;
+  disabled: boolean;
+}
+
+function pickerOptions(now: Date): PickerOption[] {
+  const { last, today } = shortcutFiles(state.files, localDay(now));
+  const shortcuts: PickerOption[] = [
+    { label: "Last file", detail: last?.name ?? null, file: last?.name ?? null, disabled: last === undefined },
+    { label: "Today", detail: today?.name ?? "no file for today", file: today?.name ?? null, disabled: today === undefined },
+  ];
+  const files = state.files.map((file) => ({ label: file.name, detail: file.date ? dayWithWeekday(file.date) : null, file: file.name, disabled: false }));
+  return [...shortcuts, ...files];
+}
+
 // ---- loading and saving -----------------------------------------------------
 
 async function loadFiles(preferred: string | null): Promise<void> {
   state.files = await api.files();
-  const first = state.files.find((file) => file.name === preferred) ?? state.files[0];
+  // The file named in the URL, else the newest day; open() puts the choice in the URL.
+  const first = chooseDayFile(state.files, preferred);
   if (first) await open(first.name, true);
   else showStatus("No .md files in this folder.", true);
 }
@@ -210,7 +298,9 @@ async function open(name: string, force = false): Promise<void> {
   }
   state.name = file.name;
   state.text = file.text;
+  typedPending = false; // a cell box of the file before this one is gone
   state.saved = file.text;
+  state.notice = null; // a message about the file before this one no longer applies
   state.base = file.hash;
   setFileInput(name);
   await parseNow();
@@ -231,7 +321,7 @@ async function save(): Promise<void> {
   state.base = saved.hash;
   state.parse = saved.parse as unknown as ParseResult;
   render();
-  showStatus("Saved. The previous version is kept as a backup.", false);
+  showStatus(savedNotice, false);
 }
 
 // A new day file: the name is the date (YYYY-MM-DD.md) and the first line is the header DD/MM/YYYY.
@@ -245,18 +335,21 @@ async function createDay(): Promise<void> {
   }
   const [, year, month, day] = match;
   const name = `${value}.md`;
+  let message: string;
   try {
     await api.create(name, `${day}/${month}/${year}\n- [ ] \n`);
-    showStatus(`Created ${name}.`, false);
+    message = `Created ${name}.`;
   } catch (err) {
     if (statusOf(err) !== 409) {
       showStatus(errorText(err), true);
       return;
     }
-    showStatus(`${name} already exists; it is open below.`, false);
+    message = `${name} already exists; it is open below.`;
   }
   state.files = await api.files();
   await open(name, true);
+  // Shown after the open, which clears the notice about the file before it. If the open failed, its error stays.
+  if (state.name === name) showStatus(message, false);
 }
 
 // YYYY-MM-DD in the local time zone, the value of a date input.
@@ -266,7 +359,7 @@ export function localDate(date: Date): string {
 }
 
 async function reload(): Promise<void> {
-  if (!confirmDiscard() && !window.confirm("Reload and lose the unsaved changes?")) return;
+  if (dirty() && !window.confirm(reloadPrompt(state.name))) return;
   await open(state.name, true);
 }
 
@@ -277,6 +370,17 @@ function scheduleParse(): void {
   parseTimer = window.setTimeout(() => void parseNow(), 250);
 }
 
+// The entry above an edited row, and its end before the edit; checked when the next parse arrives.
+let endWatch: { line: number; end: string | null } | null = null;
+
+// Before a row is deleted or re-timed: the entry above it, whose end the edit can change.
+function watchEndAbove(lines: readonly string[], index: number): void {
+  let above = index - 1;
+  while (above >= 0 && classify(lines[above]).kind !== "task") above -= 1;
+  const entry = above >= 0 ? entryAt(above) : undefined;
+  endWatch = entry ? { line: above + 1, end: entry.end } : null;
+}
+
 async function parseNow(): Promise<void> {
   try {
     state.parse = (await api.parse(state.text)) as unknown as ParseResult;
@@ -284,6 +388,11 @@ async function parseNow(): Promise<void> {
   } catch (err) {
     showStatus(errorText(err), true);
   }
+  const watch = endWatch;
+  endWatch = null;
+  const after = watch && state.parse?.ok ? state.parse.day.entries.find((entry) => entry.line === watch.line) : undefined;
+  const notice = watch && after ? endChangeNotice(watch.line, watch.end, after.end) : null;
+  if (notice) showStatus(notice, false);
   render();
 }
 
@@ -318,7 +427,7 @@ function showStatus(message: string, isError: boolean): void {
 
 function renderStatus(): void {
   const node = byId("status");
-  const parts = [dirty() ? "Unsaved changes" : "Saved"];
+  const parts = statusLead(dirty(), state.parse !== null && !state.parse.ok);
   if (state.notice) {
     node.textContent = state.notice.text;
     node.classList.toggle("error", state.notice.isError);
@@ -328,7 +437,7 @@ function renderStatus(): void {
     node.textContent = parts.join(" · ");
     node.classList.remove("error");
   } else if (state.parse) {
-    node.textContent = `${parts.join(" · ")} · parse error: ${state.parse.error}`;
+    node.textContent = [...parts, `parse error: ${state.parse.error}`].join(" · ");
     node.classList.add("error");
   } else {
     node.textContent = parts.join(" · ");
@@ -350,12 +459,12 @@ function combobox(value: string, options: () => string[], commit: (value: string
   const list = el("ul", "suggestions hidden");
   let shown: string[] = [];
   let highlight = -1;
-  let navigated = false; // Enter takes the highlighted suggestion only after the arrow keys were used
   let finished = false;
 
   const finish = (next: string | null) => {
     if (finished) return;
     finished = true;
+    typedPending = false;
     if (next !== null && next !== value) commit(next);
     else render();
   };
@@ -375,25 +484,48 @@ function combobox(value: string, options: () => string[], commit: (value: string
       list.append(item);
     }
     highlight = shown.length ? 0 : -1;
-    navigated = false;
     list.classList.toggle("hidden", shown.length === 0);
+    placeList();
     paint();
   };
 
+  // The entries box scrolls sideways, which would clip a list that opens downwards. An open list is placed
+  // on the page under its box, or above it when there is no room below.
+  const placeList = () => {
+    if (shown.length === 0) return;
+    const box = input.getBoundingClientRect();
+    const height = Math.min(list.scrollHeight, 240);
+    const below = box.bottom + height + 2 <= window.innerHeight;
+    list.style.position = "fixed";
+    list.style.left = `${box.left}px`;
+    list.style.minWidth = `${Math.max(box.width, 160)}px`;
+    list.style.top = `${below ? box.bottom + 2 : Math.max(0, box.top - height - 2)}px`;
+  };
+
   input.addEventListener("focus", refresh);
-  input.addEventListener("input", refresh);
-  input.addEventListener("blur", () => finish(input.value.trim()));
+  input.addEventListener("input", () => {
+    refresh();
+    typedPending = input.value !== value;
+    renderStatus();
+  });
+  // Leaving the box commits only what is already a choice: the value as it was, or an existing name.
+  // A half-typed name (TLS while client-a:TLS is listed) is dropped, not created as a new project.
+  input.addEventListener("blur", () => {
+    const typed = input.value.trim();
+    const known = [...new Set(options())].find((option) => option.toLowerCase() === typed.toLowerCase());
+    finish(known ?? (typed === value ? typed : null));
+  });
   input.addEventListener("keydown", (event) => {
     if ((event.key === "ArrowDown" || event.key === "ArrowUp") && shown.length) {
       event.preventDefault();
       highlight = (highlight + (event.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length;
-      navigated = true;
       paint();
     } else if (event.key === "Enter") {
+      // Enter takes the exact name, else the highlighted suggestion, else the typed text (a new name).
       event.preventDefault();
       const typed = input.value.trim();
       const exact = shown.find((option) => option.toLowerCase() === typed.toLowerCase());
-      finish(exact ?? (navigated && highlight >= 0 ? shown[highlight] : typed));
+      finish(exact ?? (shown.length && highlight >= 0 ? shown[highlight] : typed));
     } else if (event.key === "Escape") {
       input.value = value;
       list.classList.add("hidden");
@@ -425,7 +557,9 @@ function renderEntries(): void {
   const table = el("table", "entry-table");
   const head = el("tr");
   for (const label of ["Line", "Start", "End", "Time", "Description", "Project", "Duration", ""]) {
-    head.append(el("th", null, label));
+    const th = el("th", null, label);
+    if (label === "Time") th.title = TIME_HEADER_HINT;
+    head.append(th);
   }
   table.append(el("thead"), el("tbody"));
   table.querySelector("thead")?.append(head);
@@ -442,7 +576,14 @@ function renderEntries(): void {
       const input = el("input", "header-input");
       input.value = line;
       input.placeholder = "date, for example 11/11 or #toggl 11/11";
-      input.addEventListener("change", () => setText(joinLines(setLine(lines, index, input.value.trim()))));
+      input.addEventListener("input", () => {
+        typedPending = input.value.trim() !== line;
+        renderStatus();
+      });
+      input.addEventListener("change", () => {
+        typedPending = false;
+        setText(joinLines(setLine(lines, index, input.value.trim())));
+      });
       cell.append(input);
       row.append(cell);
       body.append(row);
@@ -464,7 +605,7 @@ function renderEntries(): void {
     const category = project ? state.db?.get(project)?.category ?? null : null;
     if (!matchesFilters(project, category, state.filters)) return;
     shown += 1;
-    body.append(entryRow(lines, index, parsed.time, parsed.description));
+    body.append(entryRow(lines, index, timeCellText(parsed.time, entryAt(index)?.start ?? null), parsed.description));
   });
   byId("filter-count").textContent = total === shown ? `${total} entries` : `${shown} of ${total} entries shown`;
 
@@ -483,17 +624,40 @@ function renderEntries(): void {
 function entryRow(lines: string[], index: number, time: string, description: string): HTMLElement {
   const entry = entryAt(index);
   const row = el("tr", entry ? null : "unparsed"); // unparsed: no start and end while the file has an error
+  row.dataset.line = String(index);
+  row.addEventListener(
+    "keydown",
+    (event) => {
+      if ((event.key !== "Tab" && event.key !== "Enter") || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+      const field = event.target;
+      const column = field instanceof HTMLElement ? field.closest<HTMLElement>("td")?.dataset.col : undefined;
+      const next = column ? CELL_ORDER[CELL_ORDER.indexOf(column) + 1] : undefined;
+      if (!(field instanceof HTMLInputElement) || !next) return;
+      focusAfterRender = { line: index, column: next };
+      // Tab leaves the box through blur, which commits as it does today; the focus then goes to the next field.
+      if (event.key === "Tab") {
+        event.preventDefault();
+        field.blur();
+      }
+    },
+    true,
+  );
   row.append(el("td", "muted", String(index + 1)));
   row.append(el("td", null, entry?.start ?? "-"));
   row.append(el("td", null, entry ? entry.end ?? "open" : "-"));
 
   const timeCell = el("td");
+  timeCell.dataset.col = "time";
   timeCell.append(
-    combobox(time, timeOptions, (value) => setText(setTask(lines, index, { time: value }).join("\n"))),
+    combobox(time, timeOptions, (value) => {
+      watchEndAbove(lines, index);
+      setText(setTask(lines, index, { time: value }).join("\n"));
+    }),
   );
   row.append(timeCell);
 
   const descriptionCell = el("td");
+  descriptionCell.dataset.col = "description";
   descriptionCell.append(
     combobox(description, descriptionOptions, (value) =>
       setText(setTask(lines, index, { description: value }).join("\n")),
@@ -502,36 +666,53 @@ function entryRow(lines: string[], index: number, time: string, description: str
   if (entry?.reference) descriptionCell.append(el("div", "muted small", `copies ${entry.description}`));
   row.append(descriptionCell);
 
-  row.append(projectCell(lines, index, description));
+  const projectTd = projectCell(lines, index, description);
+  projectTd.dataset.col = "project";
+  row.append(projectTd);
   row.append(el("td", "num", entry?.duration_minutes === null || !entry ? "-" : formatMinutes(entry.duration_minutes)));
 
   const actions = el("td", "actions");
-  const add = el("button", null, "+");
+  const add = el("button", null, addEntryLabel);
   add.type = "button";
   add.title = "add an entry after this one, starting when this one ends";
-  add.addEventListener("click", () =>
-    setText(joinLines(insertAfter(lines, index, timeAfter(lines, index, entry, new Date())))),
-  );
+  add.dataset.col = "add";
+  // A press keeps the cell focused, so the blur does not redraw the table before the click arrives.
+  add.addEventListener("mousedown", (event) => event.preventDefault());
+  add.addEventListener("click", () => {
+    focusAfterRender = { line: index + 1, column: "time" };
+    setText(joinLines(insertAfter(lines, index, timeAfter(lines, index, entry, new Date()))));
+  });
   const remove = el("button", null, "×");
   remove.type = "button";
   remove.title = "delete this entry";
-  remove.addEventListener("click", () => setText(joinLines(removeLine(lines, index))));
+  remove.addEventListener("click", () => {
+    watchEndAbove(lines, index);
+    setText(joinLines(removeLine(lines, index)));
+  });
   actions.append(add, remove);
   row.append(actions);
   return row;
 }
 
 function projectCell(lines: string[], index: number, description: string): HTMLElement {
-  const cell = el("td");
-  const { project: current, error } = projectOf(entryAt(index)?.description ?? description);
+  const cell = el("td", "project-cell");
+  const { project, error } = projectOf(entryAt(index)?.description ?? description);
+  // An entry without a project has an empty cell (the placeholder), not the word "unknown".
+  const current = project === UNKNOWN_PROJECT ? "" : project;
   if (error) cell.title = error;
-  cell.append(
-    combobox(
-      current,
-      () => (state.db ? [...state.db.keys()] : []),
-      (value) => void chooseProject(lines, index, value),
-    ),
+  const combo = combobox(
+    current,
+    () => (state.db ? [...state.db.keys()] : []),
+    (value) => void chooseProject(lines, index, value),
   );
+  const input = combo.querySelector("input") as HTMLInputElement;
+  if (!current) input.placeholder = PROJECT_PLACEHOLDER;
+  combo.append(el("span", "caret", "\u25BE"));
+  // A click anywhere in the cell focuses the box, which opens the list.
+  cell.addEventListener("click", (event) => {
+    if (event.target !== input) input.focus();
+  });
+  cell.append(combo);
   return cell;
 }
 
@@ -564,8 +745,16 @@ async function chooseProject(lines: string[], index: number, value: string): Pro
     render();
     return;
   }
-  setText(joinLines(setTask(lines, index, { description: change.description })));
-  if (created) showStatus(`Added ${value} to projects.yml`, false);
+  // Checked before it is applied: only this line changes, and it shows the chosen project.
+  const next = setTask(lines, index, { description: change.description });
+  const problem = verifyProjectChange(lines, next, index, value, state.db ?? new Map());
+  if (problem !== null) {
+    showStatus(`Not changed: ${problem}`, true);
+    render();
+    return;
+  }
+  setText(joinLines(next));
+  if (created) showStatus(`Added ${value}`, false);
 }
 
 // ---- plain view -------------------------------------------------------------
@@ -591,6 +780,7 @@ function render(): void {
   renderStatus();
   if (state.view === "entries") renderEntries();
   else renderPlain();
+  restoreFocus();
 }
 
 // ---- mounting ---------------------------------------------------------------
@@ -671,7 +861,7 @@ export function mountEditor(root: HTMLElement, sharedShell: Shell): Controller {
     if (classify(lines[index]).kind !== "task") return;
     event.preventDefault();
     const parsed = entryAt(index);
-    const next = insertAfter(lines, index, timeAfter(lines, index, parsed, new Date()));
+    const next = insertForTyping(lines, index, timeAfter(lines, index, parsed, new Date()));
     const text = joinLines(next);
     setText(text);
     area.value = text;
@@ -705,3 +895,4 @@ export function mountEditor(root: HTMLElement, sharedShell: Shell): Controller {
   })();
   return controller;
 }
+

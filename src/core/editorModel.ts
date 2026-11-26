@@ -1,7 +1,7 @@
 // Editing rules for the day files, without any DOM. The text is the only source of truth:
 // every change rebuilds a line of text, and the entries view reads the text back.
 import { Database, detectProjectInDb, keywordsOf } from "./reports";
-import { parseDescription, replaceKeyword } from "./description";
+import { ancestorsOf, parseDescription, replaceKeyword } from "./description";
 import { UNKNOWN_PROJECT } from "./summary";
 
 export interface TaskLine {
@@ -75,6 +75,61 @@ export function insertAfter(lines: readonly string[], index: number, time: strin
   return updated;
 }
 
+// Enter in plain text: the new entry as insertAfter makes it, with a space after a time so that the
+// caret, left at the end of the line, is set apart from the time and the typed text is not joined to it.
+export function insertForTyping(lines: readonly string[], index: number, time: string): string[] {
+  const updated = insertAfter(lines, index, time);
+  if (time) updated[index + 1] += " ";
+  return updated;
+}
+
+// The first words of the status line: "Unsaved changes", or "Saved" when the file is saved and parses.
+// A saved file with a parse error gets no "Saved", so the status does not say it is fine.
+export function statusLead(dirty: boolean, hasParseError: boolean): string[] {
+  if (dirty) return ["Unsaved changes"];
+  return hasParseError ? [] : ["Saved"];
+}
+
+// The status message when a typed day-file name opens nothing: none when no name is typed or some file matches.
+export function noDayFileNotice(typed: string, matchingFiles: number): string | null {
+  const name = typed.trim();
+  return name && matchingFiles === 0 ? `No day file named ${name}` : null;
+}
+
+// The file is unsaved when its text differs from the saved text, or a cell holds typed text not yet committed.
+export function isUnsaved(text: string, saved: string, typedPending: boolean): boolean {
+  return typedPending || text !== saved;
+}
+
+// The status line after a save. The backup of the old text is kept in the backup folder, which is not named here.
+export const savedNotice = "Saved.";
+
+// The visible label of the button that adds an entry after a row.
+export const addEntryLabel = "Add entry after";
+
+// Shown in an empty PROJECT cell, which otherwise looks like blank text.
+export const PROJECT_PLACEHOLDER = "pick a project";
+
+// The TIME cell of a valid row shows the start the parser found; a row without one keeps its typed token.
+export function timeCellText(token: string, start: string | null): string {
+  return start ?? token;
+}
+
+// The tooltip on the TIME header: what a relative token such as -30 means.
+export const TIME_HEADER_HINT =
+  "-30 means 30 minutes before the next absolute time.";
+
+// The one question asked before Reload throws away the unsaved edits to the open day.
+export function reloadPrompt(name: string): string {
+  return `Reload ${name} and lose its unsaved changes?`;
+}
+
+// The status line after an edit moved the end of the entry on line: none when the end did not change.
+export function endChangeNotice(line: number, before: string | null, after: string | null): string | null {
+  if (before === after) return null;
+  return after === null ? `Line ${line} is now open.` : `Line ${line} now ends at ${after}.`;
+}
+
 // The local time as HH:MM, from the browser's clock and time zone.
 export function clockTime(now: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -110,12 +165,17 @@ export interface ProjectChange {
   error?: string;
 }
 
-// Choosing a project adds its first keyword to the description, because the project comes
-// from the keywords. If the description already gives that project, nothing changes.
+// Choosing a project adds one of its keywords to the description, because the project comes
+// from the keywords. The keyword must not hold a separator (":" or ","), which would split the
+// description: a keyword such as "TLS: product discussion" gives the wrong task. If the description
+// already gives that project, nothing changes.
 export function withProject(description: string, project: string, db: Database): ProjectChange {
   if (!db.has(project)) return { error: `${project} is not in the project database; add it there first` };
-  const keyword = db.get(project)?.keywords[0];
-  if (!keyword) return { error: `${project} has no keyword; add one to the project database` };
+  // A keyword without ':' or ',' (see above). Its own keywords come first, then those of the projects above it:
+  // car:maintainance has the keyword car of project car, which also matches it.
+  const candidates = [project, ...ancestorsOf(project)].flatMap((name) => db.get(name)?.keywords ?? []);
+  const keyword = candidates.find((word) => !/[:,]/.test(word));
+  if (!keyword) return { error: `${project} has no keyword without ':' or ','; add one to the project database` };
   let current: ReturnType<typeof parseDescription>;
   try {
     current = parseDescription(description, keywordsOf(db));
@@ -138,6 +198,30 @@ export function withProject(description: string, project: string, db: Database):
     return { error: err instanceof Error ? err.message : String(err) };
   }
   return { description: next };
+}
+
+// Checks a change to one line before it is applied: only the line at index may change, and on that line the
+// description must give the project, as the parser will read it. Returns the reason, or null when it is right.
+export function verifyProjectChange(
+  before: readonly string[],
+  after: readonly string[],
+  index: number,
+  project: string,
+  db: Database,
+): string | null {
+  if (before.length !== after.length) return "the change would add or remove lines";
+  const other = after.findIndex((line, position) => position !== index && line !== before[position]);
+  if (other !== -1) return `the change would also change line ${other + 1}; nothing was changed`;
+  const line = classify(after[index]);
+  if (line.kind !== "task") return `line ${index + 1} is not an entry`;
+  let shown: string;
+  try {
+    shown = detectProjectInDb(line.description, db);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  if (shown !== project) return `line ${index + 1} would show ${shown}, not ${project}; nothing was changed`;
+  return null;
 }
 
 export type CategoryFilter = "all" | "categorized" | "uncategorized";

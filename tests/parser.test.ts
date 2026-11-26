@@ -207,6 +207,49 @@ test("a relative entry that passes midnight is accepted", () => {
   assert.equal(entries[0].duration_minutes, 80);
 });
 
+test("a minus entry before an absolute time after midnight is placed before midnight", () => {
+  // 30 minutes before 00:20 is 23:50, the day before it.
+  const entries = parse(dayWith("- [ ] 2300 a", "- [ ] -30 b", "- [ ] 0020 c", "- [ ] 0100 d")).entries;
+
+  assert.deepEqual(
+    entries.map((e) => [e.start, e.end, e.duration_minutes]),
+    [
+      ["23:00", "23:50", 50],
+      ["23:50", "00:20", 30],
+      ["00:20", "01:00", 40],
+      ["01:00", null, null],
+    ],
+  );
+});
+
+test("a chain of minus entries that passes midnight keeps each duration", () => {
+  // c starts 30 minutes before 00:10 (23:40), and b starts 45 minutes before c (22:55).
+  const entries = parse(dayWith("- [ ] 2200 a", "- [ ] -0:45 b", "- [ ] -0:30 c", "- [ ] 0010 d")).entries;
+
+  assert.deepEqual(entries.map((e) => [e.start, e.duration_minutes]), [
+    ["22:00", 55],
+    ["22:55", 45],
+    ["23:40", 30],
+    ["00:10", null],
+  ]);
+});
+
+test("a plus entry that passes midnight is accepted", () => {
+  const entries = parse(dayWith("- [ ] 2350 a", "- [ ] +30 b", "- [ ] 0100 c")).entries;
+
+  assert.deepEqual(entries.map((e) => [e.start, e.end, e.duration_minutes]), [
+    ["23:50", "00:20", 30],
+    ["00:20", "01:00", 40],
+    ["01:00", null, null],
+  ]);
+});
+
+test("a relative entry that passes midnight keeps the rules for a second passage and the 21:00 cutoff", () => {
+  expectThrows(() => parse(dayWith("- [ ] 2300 a", "- [ ] -30 b", "- [ ] 0020 c", "- [ ] 0010 d")), /line 5.*only one entry may pass midnight/);
+  expectThrows(() => parse(dayWith("- [ ] 2000 a", "- [ ] +30 b", "- [ ] 0100 c")), /line 4.*after 21:00/);
+  expectThrows(() => parse(dayWith("- [ ] 1700 a", "- [ ] 0020 c")), /line 3.*after 21:00/);
+});
+
 // ---- ordering -----------------------------------------------------------------------
 
 test("an entry may pass midnight: it may finish after 00:00 on the next day", () => {
@@ -333,6 +376,15 @@ test("a multi-word keyword", () => {
 
 test("a keyword belongs to one project only", () => {
   expectThrows(() => validateProjects({ gym: ["workout"], fitness: ["workout"] }), /'workout' maps to both 'gym' and 'fitness'/);
+});
+
+test("a keyword that contains another project's keyword as whole words is refused", () => {
+  expectThrows(() => validateProjects({ "Summer food drive": ["drive"], "Blood drive": ["blood drive"] }), /'blood drive'.*'drive'/);
+  expectThrows(() => validateProjects({ "Blood drive": ["blood drive"], "Summer food drive": ["drive"] }), /'drive'.*'blood drive'/);
+});
+
+test("keywords that only share part of a word do not overlap", () => {
+  assert.ok(validateProjects({ drive: ["drive"], drivers: ["drivers"] }));
 });
 
 test("a keyword collision ignores case and spaces", () => {
@@ -554,4 +606,9 @@ test("a heading marker without a tag is a header: # 17/11", () => {
     assert.equal(result.date, "2026-11-17", header);
     assert.equal(result.tag, header.includes("toggl") ? "toggl" : null, header);
   }
+});
+
+test("a project and a project below it may share a keyword; unrelated projects may not", () => {
+  assert.doesNotThrow(() => validateProjects({ car: ["car"], "car:maintainance": ["car:maintainance"] }));
+  assert.throws(() => validateProjects({ drive: ["drive"], "blood drive": ["blood drive"] }), /overlaps/);
 });

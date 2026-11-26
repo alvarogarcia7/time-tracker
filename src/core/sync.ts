@@ -22,6 +22,8 @@ export interface SyncLocal {
   // when the file changed. The previous version is kept by the store.
   write(name: string, text: string, expectedText: string): Promise<boolean>;
   create(name: string, text: string): Promise<void>;
+  // Removes a day file that this sync created and has not yet sent (a conflict copy whose write failed).
+  remove(name: string): Promise<void>;
   synced(): Promise<Map<string, SyncedState>>;
   setSynced(name: string, state: SyncedState): Promise<void>;
 }
@@ -128,7 +130,17 @@ export async function syncDays(local: SyncLocal, remote: SyncRemote, options: Sy
     const latest = (await local.read(name)).text;
     const copy = conflictName(name, options.device, options.now, (candidate) => localFiles.has(candidate) || remoteFiles.has(candidate));
     await local.create(copy, latest);
-    if (!(await local.write(name, file.text, latest))) {
+    // The copy is only kept when the file was replaced. If the write fails, the copy is removed again,
+    // so no stray copy is left to be pushed by the next sync.
+    let written: boolean;
+    try {
+      written = await local.write(name, file.text, latest);
+    } catch (err) {
+      await local.remove(copy);
+      throw err;
+    }
+    if (!written) {
+      await local.remove(copy);
       throw new Error("the file changed again during the sync; the next sync will pick it up");
     }
     await local.setSynced(name, { hash: remoteHash, sha: file.sha });

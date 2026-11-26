@@ -12,6 +12,7 @@ export type ParseResult = { ok: true; day: ParsedDay } | { ok: false; error: str
 export interface DayFileInfo {
   name: string;
   hash: string;
+  date: string | null; // YYYY-MM-DD from the header, or null when the header is not a valid date (see dayFiles.ts)
 }
 
 export interface DayFile extends DayFileInfo {
@@ -34,8 +35,15 @@ export class StoreError extends Error {
   }
 }
 
+// The conflict a write gets when the stored text is no longer the version the caller read.
+export function databaseChanged(label: string): StoreError {
+  return new StoreError(409, `${label} changed on disk since it was loaded; reload it before saving`);
+}
+
 // The storage contract. Hashes are SHA-256 of the UTF-8 bytes, in hex. Writes keep the previous
 // version (the storage decides where): writeDay and writeDatabase get the version they replace.
+// Both writes save only while the stored text still equals previous.text, checked in the same step
+// as the write (one transaction in the browser); otherwise they throw StoreError 409.
 export interface Storage {
   // How the database is named in messages, such as "projects.yml" or a path.
   readonly databaseLabel: string;
@@ -134,12 +142,11 @@ export class DayService implements EditorApi {
   }
 
   // Saves the whole database text. It must parse as a database, and the file must still be the
-  // version the caller read (base is its hash).
+  // version the caller read (base is its hash). The storage checks the stored text again in the
+  // same step as the write, so a save made by another tab in between is refused too.
   async saveProjects(text: string, base: string | null): Promise<{ hash: string }> {
     const current = await this.projects();
-    if (base !== current.hash) {
-      throw new StoreError(409, "projects.yml changed on disk since it was loaded; reload it before saving");
-    }
+    if (base !== current.hash) throw databaseChanged(this.storage.databaseLabel);
     try {
       loadDatabase(text, this.storage.databaseLabel);
     } catch (err) {
@@ -148,6 +155,7 @@ export class DayService implements EditorApi {
     return this.storage.writeDatabase(text, current);
   }
 
+  // A new project is added to the text read here, and written only if that text is still stored.
   async createProject(name: string): Promise<{ name: string; keywords: string[] }> {
     const current = await this.projects();
     let added;

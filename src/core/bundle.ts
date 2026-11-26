@@ -1,0 +1,125 @@
+// The export bundle: every day file and the project database as one JSON document, and the plan for
+// importing one. An import never overwrites a file whose text differs: the imported text is added as
+// a copy with a .conflict-<stamp> suffix, and the copy is reported.
+import { fileStamp } from "./hash";
+
+export const BUNDLE_FORMAT = "time-parser-bundle";
+
+export interface BundleFile {
+  name: string;
+  text: string;
+  updated: string; // ISO time of the last change on the device that exported it
+}
+
+export interface Bundle {
+  format: typeof BUNDLE_FORMAT;
+  version: 1;
+  exported: string;
+  days: BundleFile[];
+  projects: BundleFile | null;
+  // Copies of the project database kept by an import conflict (projects.conflict-<stamp>.yml).
+  projectCopies: BundleFile[];
+}
+
+export function makeBundle(
+  days: BundleFile[],
+  projects: BundleFile | null,
+  exported: Date,
+  projectCopies: BundleFile[] = [],
+): Bundle {
+  return {
+    format: BUNDLE_FORMAT,
+    version: 1,
+    exported: exported.toISOString(),
+    days: [...days].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+    projects,
+    projectCopies: [...projectCopies].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+  };
+}
+
+function isFileEntry(value: unknown): value is BundleFile {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.name === "string" && typeof entry.text === "string" && typeof entry.updated === "string";
+}
+
+// The name of a copy of the project database: a plain .yml file name, other than projects.yml itself.
+export function isDatabaseCopyName(name: string): boolean {
+  return name.endsWith(".yml") && name !== "projects.yml" && name !== ".yml" && !/[\/\\]/.test(name) && !name.startsWith(".");
+}
+
+// Checks the shape of a bundle; throws a message that names the problem.
+export function parseBundle(text: string): Bundle {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("the file is not JSON");
+  }
+  const bundle = value as Partial<Bundle>;
+  if (typeof value !== "object" || value === null || bundle.format !== BUNDLE_FORMAT) {
+    throw new Error("the file is not a time-parser export");
+  }
+  if (bundle.version !== 1) throw new Error(`unsupported export version ${String(bundle.version)}`);
+  if (!Array.isArray(bundle.days) || !bundle.days.every(isFileEntry)) throw new Error("the days list is malformed");
+  if (bundle.projects !== null && bundle.projects !== undefined) {
+    if (!isFileEntry(bundle.projects)) throw new Error("the projects database is malformed");
+    if (bundle.projects.name !== "projects.yml") {
+      throw new Error(`${bundle.projects.name}: not the project database (projects.yml)`);
+    }
+  }
+  if (bundle.projectCopies !== undefined && (!Array.isArray(bundle.projectCopies) || !bundle.projectCopies.every(isFileEntry))) {
+    throw new Error("the project database copies are malformed");
+  }
+  for (const day of bundle.days) {
+    if (!day.name.endsWith(".md") || day.name.includes("/")) throw new Error(`${day.name}: not a day file name`);
+  }
+  for (const copy of bundle.projectCopies ?? []) {
+    if (!isDatabaseCopyName(copy.name)) throw new Error(`${copy.name}: not a project database name`);
+  }
+  return { ...bundle, projects: bundle.projects ?? null, projectCopies: bundle.projectCopies ?? [] } as Bundle;
+}
+
+export type ImportAction =
+  | { kind: "add"; target: "day" | "database"; name: string; text: string }
+  | { kind: "conflict"; target: "day" | "database"; name: string; copy: string; text: string }
+  | { kind: "same"; target: "day" | "database"; name: string };
+
+// The copy name: foo.md becomes foo.conflict-<stamp>.md, projects.yml becomes projects.conflict-<stamp>.yml.
+export function importCopyName(name: string, now: Date, taken: (name: string) => boolean): string {
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const extension = dot > 0 ? name.slice(dot) : "";
+  const stamp = fileStamp(now);
+  let candidate = `${base}.conflict-${stamp}${extension}`;
+  for (let n = 2; taken(candidate); n += 1) candidate = `${base}.conflict-${stamp}-${n}${extension}`;
+  return candidate;
+}
+
+// Decides what to do with each file of the bundle, given the texts already on the device.
+// localDays: name to text of the day files; localDatabases: name to text of each project database file
+// (projects.yml and its conflict copies).
+export function planImport(
+  bundle: Bundle,
+  localDays: Map<string, string>,
+  localDatabases: Map<string, string>,
+  now: Date,
+): ImportAction[] {
+  const actions: ImportAction[] = [];
+  const taken = new Set([...localDays.keys(), ...localDatabases.keys()]);
+  const place = (target: "day" | "database", name: string, text: string, existing: string | null) => {
+    if (existing === null) {
+      actions.push({ kind: "add", target, name, text });
+    } else if (existing === text) {
+      actions.push({ kind: "same", target, name });
+    } else {
+      const copy = importCopyName(name, now, (candidate) => taken.has(candidate));
+      taken.add(copy);
+      actions.push({ kind: "conflict", target, name, copy, text });
+    }
+  };
+  for (const day of bundle.days) place("day", day.name, day.text, localDays.get(day.name) ?? null);
+  const databases = [...(bundle.projects ? [bundle.projects] : []), ...bundle.projectCopies];
+  for (const entry of databases) place("database", entry.name, entry.text, localDatabases.get(entry.name) ?? null);
+  return actions;
+}

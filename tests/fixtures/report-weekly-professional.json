@@ -1,0 +1,49 @@
+{
+  "period": "weekly",
+  "from": "2026-11-11",
+  "to": "2026-11-12",
+  "projects": [],
+  "prefixes": [],
+  "category": "professional",
+  "totals": {
+    "hours": 4.15,
+    "entries": 7,
+    "open_entries": 1,
+    "days": 2
+  },
+  "by_period": [
+    {
+      "period": "2026-W46",
+      "hours": 4.15,
+      "entries": 7,
+      "open_entries": 1
+    }
+  ],
+  "by_project": [
+    {
+      "project": "client-a",
+      "category": "professional",
+      "hours": 1.0,
+      "entries": 2,
+      "open_entries": 0,
+      "share_percent": 24.1
+    },
+    {
+      "project": "deep-work",
+      "category": "professional",
+      "hours": 1.0,
+      "entries": 2,
+      "open_entries": 0,
+      "share_percent": 24.1
+    },
+    {
+      "project": "unknown",
+      "category": null,
+      "hours": 2.15,
+      "entries": 3,
+      "open_entries": 1,
+      "share_percent": 51.8
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TimeEntryDay",
+  "description": "One day of time entries produced by time_parser.",
+  "type": "object",
+  "required": [
+    "date",
+    "parsed_at",
+    "original_text",
+    "parser_version",
+    "tag",
+    "entries",
+    "schema"
+  ],
+  "properties": {
+    "date": {
+      "type": "string",
+      "format": "date",
+      "description": "Day of the entries (YYYY-MM-DD)."
+    },
+    "parsed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When parsing ran, ISO 8601 with offset."
+    },
+    "original_text": {
+      "type": "string",
+      "description": "The input text exactly as received."
+    },
+    "parser_version": {
+      "type": "string",
+      "description": "Version of time_parser that produced this output."
+    },
+    "tag": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Tag from the day header without the #, or null when the header has none."
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    },
+    "schema": {
+      "type": "string",
+      "description": "Path of the JSON Schema file that describes this output."
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": [
+        "line",
+        "source",
+        "start",
+        "end",
+        "start_type",
+        "time_expression",
+        "duration_minutes",
+        "description",
+        "task",
+        "project",
+        "reference"
+      ],
+      "properties": {
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based line number in original_text."
+        },
+        "source": {
+          "type": "string",
+          "description": "The task line as written."
+        },
+        "start": {
+          "type": "string",
+          "pattern": "^\\d{2}:\\d{2}$",
+          "description": "Start time (HH:MM)."
+        },
+        "end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^\\d{2}:\\d{2}$",
+          "description": "Start of the next entry (HH:MM), or null for the last entry."
+        },
+        "start_type": {
+          "enum": [
+            "absolute",
+            "relative"
+          ]
+        },
+        "time_expression": {
+          "type": "string",
+          "description": "Start time as written."
+        },
+        "duration_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "description": {
+          "type": "string",
+          "description": "Description after references are resolved."
+        },
+        "project": {
+          "type": "string"
+        },
+        "reference": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "start",
+            "line"
+          ],
+          "properties": {
+            "start": {
+              "type": "string",
+              "pattern": "^\\d{2}:\\d{2}$"
+            },
+            "line": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "description": "The entry whose description was reused, or null."
+        },
+        "task": {
+          "type": "string",
+          "description": "The task part of the description, as written. Equal to the description when the description has no keyword split off."
+        }
+      }
+    }
+  },
+  "$id": "schemas/time-entry-day-1.2.0-schema.json",
+  "version": "1.2.0"
+}

@@ -47,6 +47,11 @@ describe("export bundle", () => {
 });
 
 describe("import plan", () => {
+  test("a day name with a backslash is refused, as the editor refuses to open it", () => {
+    const bundle = { format: BUNDLE_FORMAT, version: 1, days: [{ name: "2026-11-11\\evil.md", text: "", updated: "" }] };
+    assert.throws(() => parseBundle(JSON.stringify(bundle)), /not a day file name/);
+  });
+
   test("new files are added, identical ones are skipped", () => {
     const bundle = parseBundle(JSON.stringify(makeBundle([DAY], PROJECTS, NOW)));
     const plan = planImport(bundle, new Map([[DAY.name, DAY.text]]), new Map([[PROJECTS.name, PROJECTS.text]]), NOW);

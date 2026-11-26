@@ -72,7 +72,10 @@ export function parseBundle(text: string): Bundle {
     throw new Error("the project database copies are malformed");
   }
   for (const day of bundle.days) {
-    if (!day.name.endsWith(".md") || day.name.includes("/")) throw new Error(`${day.name}: not a day file name`);
+    // The same rule as checkDayName in workspace.ts: a Markdown file with no folder part, so the editor can open it.
+    if (!day.name.endsWith(".md") || day.name.includes("/") || day.name.includes("\\")) {
+      throw new Error(`${day.name}: not a day file name`);
+    }
   }
   for (const copy of bundle.projectCopies ?? []) {
     if (!isDatabaseCopyName(copy.name)) throw new Error(`${copy.name}: not a project database name`);

@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install check build cli test run e2e site serve icons samples check-samples view import report sync-projects viewer-build editor clean notes-clone notes-sync notes-select notes-import-review-commit notes-keep-local notes-take-incoming
+.PHONY: help install check build cli test run e2e site serve icons samples check-samples view import freeze reparse-check report sync-projects viewer-build editor clean notes-clone notes-sync notes-select notes-import-review-commit notes-keep-local notes-take-incoming
 
 FILE ?= tests/fixtures/sample/day.md
 PROJECTS ?= data/projects.yml
@@ -9,6 +9,8 @@ JSON ?= tests/fixtures/sample/expected/week-day.json
 VIEW ?= all
 
 IN_DIR ?= data
+FORCE ?=
+UNFREEZE ?=
 OUT_DIR ?= $(IN_DIR)
 PATTERN ?=
 
@@ -24,7 +26,7 @@ FORMAT ?= text
 
 
 EDITOR_PORT ?= 8001
-EDITOR_DIR ?= data/in/latest/
+EDITOR_DIR ?= data/
 EDITOR_URL = http://127.0.0.1:$(EDITOR_PORT)/
 
 NODE = node dist/cli.js
@@ -38,7 +40,7 @@ NEW_IMPORT_DIR ?= data/in/$(STAMP)
 NOTES_SELECT_ARGS ?=
 # The ledger of imported Apple Notes notes (see docs/notes-import.md).
 LEDGER ?= data/in/imports.json
-IMPORT_DIR ?= data/in/latest
+IMPORT_DIR ?= data/
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -84,8 +86,15 @@ check-samples: ## Compare each sample's output with tests/fixtures/sample/expect
 view: cli ## Show a parser output JSON as text (JSON=path, VIEW=all|entries|projects)
 	$(NODE) view $(JSON) --view $(VIEW)
 
-import: cli ## Convert every IN_DIR/*.md and *.html to OUT_DIR/<name>.json (PROJECTS and YEAR apply; PATTERN overrides the files)
-	$(NODE) convert $(IN_DIR) $(OUT_DIR) $(if $(PATTERN),--pattern "$(PATTERN)") --year $(YEAR) $(if $(wildcard $(PROJECTS)),--projects $(PROJECTS))
+import: cli ## Convert every IN_DIR/*.md and *.html to OUT_DIR/<name>.json (PROJECTS and YEAR apply; PATTERN overrides the files; unchanged files are skipped, FORCE=1 parses all)
+	$(NODE) convert $(IN_DIR) $(OUT_DIR) $(if $(PATTERN),--pattern "$(PATTERN)") --year $(YEAR) $(if $(wildcard $(PROJECTS)),--projects $(PROJECTS)) $(if $(FORCE),--force)
+
+freeze: cli ## Freeze FILE, or every day in DATA_DIR from FROM to TO (DB: project database; UNFREEZE=1 removes the freeze line)
+	@if [ -z "$(FROM)" ] && [ "$(origin FILE)" = "file" ]; then echo "make freeze needs FILE=... or FROM=... TO=... (with DATA_DIR)"; exit 1; fi
+	$(NODE) freeze $(if $(FROM),,$(FILE)) --db $(DB) $(if $(FROM),--from $(FROM) --to $(TO) --dir $(DATA_DIR)) $(if $(UNFREEZE),--unfreeze)
+
+reparse-check: cli ## Parse the frozen files in DATA_DIR again with this parser; list what changed and flag a snapshot that no longer matches (exit 1 when so)
+	$(NODE) reparse-check $(DATA_DIR) --db $(DB)
 
 notes-clone: ## Clone Notes Exporter into NOTES_EXPORTER when it is not there yet
 	@test -d $(NOTES_EXPORTER) || git clone $(NOTES_EXPORTER_REPO) $(NOTES_EXPORTER)
@@ -98,9 +107,18 @@ notes-select: ## Select the Toggl notes of the export into NEW_IMPORT_DIR and wr
 	@echo "Next: make notes-import-review-commit IMPORT_DIR=$(NEW_IMPORT_DIR)"
 	@echo "Then, if the import is accepted: bash $(NEW_IMPORT_DIR)/delete.sh"
 
-save:
+save: ## Commit data/ locally; saves only, pushes nothing
 	cd data; git add -f . ; git diff --cached --quiet || git commit -m "Manual save of data/" 2>&1
-.PHONY: save
+
+sync: save ## Save, then push the current branch to GitLab (origin) and projects.yml to the GitHub data repository; exits non-zero if either fails
+	@branch=$$(git rev-parse --abbrev-ref HEAD); st=0; \
+	if git push origin "$$branch"; then echo "gitlab: pushed $$branch to origin"; else echo "gitlab: push of $$branch to origin FAILED (no force used)"; st=1; fi; \
+	if node scripts/sync-projects-github.mjs $(DB); then :; else echo "github: sync FAILED"; st=1; fi; \
+	exit $$st
+
+sync-projects-github: ## Copy DB (projects.yml) to the GitHub data repository only; refuses to delete projects there
+	node scripts/sync-projects-github.mjs $(DB)
+.PHONY: save sync sync-projects-github
 
 notes-import-review-commit: cli ## Import the selected notes in IMPORT_DIR (data/in/latest by default), write REPORT.txt, and commit
 	@echo "" > errors.txt
@@ -117,7 +135,7 @@ notes-keep-local: ## Keep the local copy of a note that changed in Apple Notes (
 notes-take-incoming: ## Replace the local copy with the changed Apple Notes version (FILE=the local copy; the edited copy goes to replaced/)
 	node scripts/notes-import.mjs take-incoming --ledger $(LEDGER) --file "$(FILE)"
 
-report: cli ## Hours report from DATA_DIR (DB, PERIOD=daily|weekly|monthly|quarterly|yearly, FROM, TO, PROJECT, PREFIX, CATEGORY, FORMAT=text|json)
+report: cli ## Hours report from DATA_DIR (DB, PERIOD=daily|weekly|monthly|quarterly|half|yearly, FROM, TO, PROJECT, PREFIX, CATEGORY, FORMAT=text|json)
 	$(NODE) report $(DATA_DIR) --db $(DB) --period $(PERIOD) $(if $(FROM),--from $(FROM)) $(if $(TO),--to $(TO)) $(if $(PROJECT),--project "$(PROJECT)") $(if $(PREFIX),--prefix "$(PREFIX)") $(if $(CATEGORY),--category $(CATEGORY)) --format $(FORMAT)
 
 sync-projects: cli ## Add projects found in DATA_DIR but not in DB to DB, as comments to accept

@@ -15,6 +15,7 @@ export const EDITOR_TEMPLATE = `
     <button type="button" id="tab-plain" aria-pressed="false">Plain text</button>
   </div>
   <button type="button" id="reload">Reload</button>
+  <button type="button" id="delete" class="danger" disabled>Delete</button>
   <button type="button" id="save" class="primary" disabled>Save</button>
   <div id="status" class="small muted" role="status"></div>
 </header>
@@ -41,7 +42,11 @@ export const EDITOR_TEMPLATE = `
     <div id="entries"></div>
   </section>
   <section id="plain" class="hidden">
-    <textarea id="plain-text" spellcheck="false" aria-label="day file text"></textarea>
+    <div class="plain-grid">
+      <div id="plain-numbers" class="plain-side" aria-hidden="true"></div>
+      <textarea id="plain-text" spellcheck="false" wrap="off" aria-label="day file text"></textarea>
+      <div id="plain-projects" class="plain-side" aria-hidden="true"></div>
+    </div>
   </section>
 </div>
 `;

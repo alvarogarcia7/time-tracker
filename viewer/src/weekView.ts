@@ -1,18 +1,9 @@
 // The week viewer: the week's totals, a bar per day stacked by project, each project's share, and the
 // week broken down by project and task. The layout follows the usual time-tracking week report.
-import {
-  ProjectGroup,
-  ProjectNode,
-  UNKNOWN_COLOR,
-  formatMinutes,
-  formatShare,
-  groupByProject,
-  projectColors,
-  projectTree,
-  tasksOf,
-} from "@core/summary";
-import type { TaskGroup } from "@core/summary";
+import { ProjectGroup, UNKNOWN_COLOR, formatMinutes, formatShare, groupByProject, projectColors } from "@core/summary";
 import type { WeekSummary } from "@core/week";
+import { breakdownTable } from "./breakdownView";
+import { durationByDay } from "./durationByDay";
 import { dot, el } from "./dom";
 
 export interface WeekOptions {
@@ -21,13 +12,6 @@ export interface WeekOptions {
   move(weeks: number): void;
   today(): void;
   toggle(path: string): void;
-}
-
-const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-// "Mon 09-11": the weekday, then the day and month as in the file names.
-function dayLabel(date: string, index: number): string {
-  return `${WEEKDAY_NAMES[index]} ${date.slice(8, 10)}-${date.slice(5, 7)}`;
 }
 
 // "09 – 15 Nov 2026", for the week's Monday and Sunday.
@@ -87,59 +71,6 @@ function stats(week: WeekSummary): HTMLElement {
   return row;
 }
 
-// Hour gridlines and the day columns. Each column is one day, stacked by project, bottom to top.
-function dayChart(week: WeekSummary, groups: ProjectGroup[], colors: Map<string, string>): HTMLElement {
-  const card = section("Duration by day", "card week-card");
-  const peak = Math.max(0, ...week.days.map((day) => day.minutes));
-  const top = Math.max(60, Math.ceil(peak / 60) * 60); // the axis runs to a whole hour
-  const hourStep = top > 8 * 60 ? 2 : 1;
-  const projects = groups.map((group) => group.project);
-
-  const plot = el("div", "week-plot");
-  for (let hour = 0; hour * 60 <= top; hour += hourStep) {
-    const line = el("div", "week-tick");
-    line.style.bottom = `${((hour * 60) / top) * 100}%`;
-    line.append(el("span", "week-tick-label", `${hour}h`));
-    plot.append(line);
-  }
-  const columns = el("div", "week-columns");
-  week.days.forEach((day, index) => {
-    const column = el("div", "week-col");
-    if (day.minutes > 0) {
-      const height = (day.minutes / top) * 100;
-      const stack = el("div", "week-bar");
-      stack.style.height = `${height}%`;
-      for (const project of projects) {
-        const minutes = day.byProject.get(project);
-        if (!minutes) continue;
-        const segment = el("div", "week-seg");
-        segment.style.flexGrow = String(minutes);
-        segment.style.background = colors.get(project) ?? UNKNOWN_COLOR;
-        segment.title = `${project}: ${formatMinutes(minutes)}`;
-        stack.append(segment);
-      }
-      const total = el("span", "week-total", formatMinutes(day.minutes));
-      total.style.bottom = `calc(${height}% + 4px)`;
-      column.append(stack, total);
-    }
-    column.title = `${dayLabel(day.date, index)}: ${formatMinutes(day.minutes)}`;
-    columns.append(column);
-  });
-  plot.append(columns);
-
-  const labels = el("div", "week-labels");
-  week.days.forEach((day, index) => labels.append(el("span", "week-label", dayLabel(day.date, index))));
-
-  const legend = el("div", "legend");
-  for (const group of groups) {
-    const item = el("div", "legend-item");
-    item.append(dot(colors.get(group.project)), el("span", "legend-name", group.project));
-    legend.append(item);
-  }
-  card.append(plot, labels, legend);
-  return card;
-}
-
 // The share of the week for each project, as a ring with the total in its middle.
 function distribution(week: WeekSummary, groups: ProjectGroup[], colors: Map<string, string>): HTMLElement {
   const card = section("Project distribution", "card week-card");
@@ -175,61 +106,7 @@ function distribution(week: WeekSummary, groups: ProjectGroup[], colors: Map<str
 // The breakdown: each project with its sub-projects and its tasks (the descriptions) under it.
 function breakdown(week: WeekSummary, colors: Map<string, string>, options: WeekOptions): HTMLElement {
   const card = section("Project and task breakdown", "card");
-  const wrap = el("div", "table-wrap");
-  const table = el("table", "entry-table breakdown");
-  const head = el("tr");
-  for (const label of ["Project | task", "Duration", "Duration %"]) head.append(el("th", label === "Project | task" ? null : "num", label));
-  table.append(el("thead"), el("tbody"));
-  table.querySelector("thead")?.append(head);
-  const body = table.querySelector("tbody") as HTMLElement;
-
-  const share = (minutes: number) => formatShare(minutes, week.minutes);
-  const taskRow = (task: TaskGroup, depth: number) => {
-    const row = el("tr", "task-row");
-    const name = el("td");
-    name.style.paddingLeft = `${26 + depth * 20}px`;
-    name.append(el("span", "muted", "· "), document.createTextNode(task.description));
-    if (task.count > 1) name.append(el("span", "muted small", ` ×${task.count}`));
-    row.append(name, el("td", "num", formatMinutes(task.minutes)), el("td", "num", share(task.minutes)));
-    body.append(row);
-  };
-  const projectRows = (nodes: ProjectNode[], depth: number) => {
-    for (const node of nodes) {
-      const expandable = node.children.length > 0 || node.own.length > 0;
-      const open = expandable && options.expanded.has(node.path);
-      const row = el("tr", depth === 0 ? "project-row" : "subproject-row");
-      const name = el("td");
-      name.style.paddingLeft = `${8 + depth * 20}px`;
-      if (expandable) {
-        const toggle = el("button", "chevron", open ? "▾" : "▸");
-        toggle.type = "button";
-        toggle.setAttribute("aria-expanded", String(open));
-        toggle.title = open ? "collapse" : "expand";
-        toggle.addEventListener("click", () => options.toggle(node.path));
-        name.append(toggle);
-      } else {
-        name.append(el("span", "chevron-space"));
-      }
-      name.append(dot(colors.get(node.path)), el("span", depth === 0 ? "lane-name" : null, node.label));
-      row.append(name, el("td", "num", formatMinutes(node.minutes)), el("td", "num", share(node.minutes)));
-      body.append(row);
-      if (open) {
-        projectRows(node.children, depth + 1);
-        for (const task of tasksOf(node.own)) taskRow(task, depth + 1);
-      }
-    }
-  };
-  projectRows(projectTree(week.entries), 0);
-
-  const total = el("tr", "total-row");
-  total.append(
-    el("td", "lane-name", "TOTAL"),
-    el("td", "num", formatMinutes(week.minutes)),
-    el("td", "num", week.minutes > 0 ? "100%" : "0%"),
-  );
-  body.append(total);
-  wrap.append(table);
-  card.append(wrap);
+  card.append(breakdownTable(week.entries, week.minutes, colors, options));
   return card;
 }
 
@@ -245,7 +122,9 @@ export function renderWeek(week: WeekSummary, options: WeekOptions): HTMLElement
   const groups = groupByProject(week.entries);
   root.append(stats(week));
   const pair = el("div", "week-pair");
-  pair.append(dayChart(week, groups, colors), distribution(week, groups, colors));
+  const dayCard = section("Duration by day", "card week-card");
+  dayCard.append(...durationByDay(week.days, groups.map((group) => group.project), colors));
+  pair.append(dayCard, distribution(week, groups, colors));
   root.append(pair, breakdown(week, colors, options));
   return root;
 }

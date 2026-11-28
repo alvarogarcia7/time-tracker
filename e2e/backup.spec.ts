@@ -58,7 +58,7 @@ test("an export is one JSON file, importing it again changes nothing, and a chan
   await page.locator("#import-file").setInputFiles(copyPath);
   await expect(page.locator("#backup-status")).toContainText(".conflict-");
 
-  await page.getByRole("tab", { name: "Editor" }).click();
+  await page.getByRole("tab", { name: "Editor", exact: true }).click();
   await expect(page.locator("#editor-file")).toHaveValue(file);
   await page.locator("#editor-file").click();
   await expect(page.locator("#editor-file")).toHaveValue(file);

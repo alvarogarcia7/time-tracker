@@ -13,7 +13,7 @@ export function today(): { file: string; header: string } {
 // Opens the app's start page and waits until the editor is shown.
 export async function openApp(page: Page): Promise<void> {
   await page.goto("./");
-  await expect(page.getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "Editor", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("#editor-file")).toBeVisible();
 }
 

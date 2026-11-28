@@ -1,6 +1,6 @@
 // The projects tab: the project database as a table, with a way to add a project and an editor
 // for the whole file. Saving goes through the shell, which asks the server to check the text first.
-import { Database, loadDatabase, newProjectProblem } from "@core/reports";
+import { categoryForNew, Database, loadDatabase, newProjectProblem } from "@core/reports";
 import type { Controller, Shell } from "./shell";
 
 const TEMPLATE = `
@@ -26,6 +26,7 @@ const TEMPLATE = `
     <label>Keywords, comma-separated <input id="new-keywords" type="text" autocomplete="off"> <span id="add-message" class="small" role="status"></span></label>
     <button id="add-project" type="button" class="primary-button">Add</button>
   </div>
+  <p class="muted small">A project with no category leaves its days in Files to fix, unless a parent project has one: it takes its parent's.</p>
 </section>
 <section class="card">
   <h3 class="panel-title">The whole file</h3>
@@ -64,11 +65,13 @@ export function mountProjects(root: HTMLElement, shell: Shell): Controller {
       ...[...db.values()].map((project) => {
         const row = document.createElement("tr");
         const cells = [project.name, project.category ?? "uncategorised", project.keywords.join(", ")];
-        for (const cell of cells) {
+        const labels = ["Project", "Category", "Keywords"];
+        cells.forEach((cell, index) => {
           const td = document.createElement("td");
           td.textContent = cell;
+          td.dataset.label = labels[index];
           row.append(td);
-        }
+        });
         return row;
       }),
     );
@@ -122,7 +125,6 @@ export function mountProjects(root: HTMLElement, shell: Shell): Controller {
     const name = byId<HTMLInputElement>("new-name").value.trim();
     reportAdd("");
     if (!name) return reportAdd("Give the project a name.", true);
-    const category = byId<HTMLSelectElement>("new-category").value;
     const keywords = byId<HTMLInputElement>("new-keywords")
       .value.split(",")
       .map((word) => word.trim())
@@ -134,6 +136,7 @@ export function mountProjects(root: HTMLElement, shell: Shell): Controller {
     } catch {
       // A file that does not parse is refused by the save below, with its own message.
     }
+    const category = byId<HTMLSelectElement>("new-category").value || categoryForNew(existing, name) || "";
     const problem = newProjectProblem(existing, name, words);
     if (problem !== null) return reportAdd(problem, true);
     const base = text.value.trim() ? text.value.replace(/\n*$/, "\n") + "\n" : "";

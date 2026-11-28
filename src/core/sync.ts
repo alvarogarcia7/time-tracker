@@ -22,10 +22,13 @@ export interface SyncLocal {
   // when the file changed. The previous version is kept by the store.
   write(name: string, text: string, expectedText: string): Promise<boolean>;
   create(name: string, text: string): Promise<void>;
-  // Removes a day file that this sync created and has not yet sent (a conflict copy whose write failed).
-  remove(name: string): Promise<void>;
+  // Removes a day file (keeping its text as a backup) only while it still reads as expectedText. Returns
+  // false when the file changed. Used for a deletion made on GitHub and for a conflict copy whose write failed.
+  remove(name: string, expectedText: string): Promise<boolean>;
   synced(): Promise<Map<string, SyncedState>>;
   setSynced(name: string, state: SyncedState): Promise<void>;
+  // Drops the sync state of a day that is gone on both sides.
+  forget(name: string): Promise<void>;
 }
 
 // The data repository, as the sync needs it (see githubRepo in github.ts).
@@ -33,6 +36,7 @@ export interface SyncRemote {
   list(): Promise<RemoteEntry[]>;
   get(name: string): Promise<{ text: string; sha: string }>;
   put(name: string, text: string, sha: string | null, message: string): Promise<{ sha: string }>;
+  delete(name: string, sha: string, message: string): Promise<void>;
 }
 
 export interface SyncOptions {
@@ -45,7 +49,20 @@ export interface SyncOutcome {
   pushed: string[];
   pulled: string[];
   conflicts: { name: string; copy: string }[];
+  deleted: string[]; // deleted on GitHub, because it was deleted on this device
+  removed: string[]; // removed from this device, because it was deleted on GitHub
   errors: { name: string; message: string }[];
+}
+
+export type OneSidedPlan = "push" | "pull" | "delete-local" | "delete-remote";
+
+// The plan for a day file that exists on one side only. Without a state from the last sync the file is
+// new on that side: it is sent from this device or fetched from GitHub. With one, the other side deleted
+// it, and the deletion is carried over, unless the side that still has it changed it since the last sync:
+// then that version is kept (sent, or fetched), so an edit is never lost.
+export function planOneSided(only: "local" | "remote", known: SyncedState | undefined, changed: boolean): OneSidedPlan {
+  if (!known || changed) return only === "local" ? "push" : "pull";
+  return only === "local" ? "delete-local" : "delete-remote";
 }
 
 // The name of the copy that keeps this device's version of a conflicting file.
@@ -59,12 +76,17 @@ export function conflictName(name: string, device: string, now: Date, taken: (na
 }
 
 export async function syncDays(local: SyncLocal, remote: SyncRemote, options: SyncOptions): Promise<SyncOutcome> {
-  const outcome: SyncOutcome = { checked: 0, pushed: [], pulled: [], conflicts: [], errors: [] };
+  const outcome: SyncOutcome = { checked: 0, pushed: [], pulled: [], conflicts: [], deleted: [], removed: [], errors: [] };
   const localFiles = new Map((await local.list()).map((file) => [file.name, file]));
   const remoteFiles = new Map((await remote.list()).map((file) => [file.name, file]));
   const state = await local.synced();
   const names = [...new Set([...localFiles.keys(), ...remoteFiles.keys()])].sort();
   const commit = (name: string) => `Sync ${name} from ${options.device}`;
+
+  // A file gone from both sides needs no state; a file of the same name made later must not match it.
+  for (const name of state.keys()) {
+    if (!localFiles.has(name) && !remoteFiles.has(name)) await local.forget(name);
+  }
 
   for (const name of names) {
     outcome.checked += 1;
@@ -82,6 +104,13 @@ export async function syncDays(local: SyncLocal, remote: SyncRemote, options: Sy
     const known = state.get(name);
 
     if (mine && !theirs) {
+      if (planOneSided("local", known, mine.hash !== known?.hash) === "delete-local") {
+        const { text } = await local.read(name);
+        if (!(await local.remove(name, text))) throw new Error(`${name} changed during the sync; the next sync will pick it up`);
+        await local.forget(name);
+        outcome.removed.push(name);
+        return;
+      }
       const { text } = await local.read(name);
       const pushed = await remote.put(name, text, null, commit(name));
       await local.setSynced(name, { hash: await sha256Hex(text), sha: pushed.sha });
@@ -89,6 +118,12 @@ export async function syncDays(local: SyncLocal, remote: SyncRemote, options: Sy
       return;
     }
     if (!mine && theirs) {
+      if (planOneSided("remote", known, theirs.sha !== known?.sha) === "delete-remote") {
+        await remote.delete(name, theirs.sha, `Delete ${name} from ${options.device}`);
+        await local.forget(name);
+        outcome.deleted.push(name);
+        return;
+      }
       const file = await remote.get(name);
       await local.create(name, file.text);
       await local.setSynced(name, { hash: await sha256Hex(file.text), sha: file.sha });
@@ -136,11 +171,11 @@ export async function syncDays(local: SyncLocal, remote: SyncRemote, options: Sy
     try {
       written = await local.write(name, file.text, latest);
     } catch (err) {
-      await local.remove(copy);
+      await local.remove(copy, latest);
       throw err;
     }
     if (!written) {
-      await local.remove(copy);
+      await local.remove(copy, latest);
       throw new Error("the file changed again during the sync; the next sync will pick it up");
     }
     await local.setSynced(name, { hash: remoteHash, sha: file.sha });

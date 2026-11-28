@@ -2,16 +2,19 @@
 // through the editor's HTTP routes.
 //
 //   node dist/cli.js parse FILE [--projects DB] [--year N]
-//   node dist/cli.js convert IN_DIR [OUT_DIR] [--pattern P]... [--projects DB] [--year N]
+//   node dist/cli.js convert IN_DIR [OUT_DIR] [--pattern P]... [--projects DB] [--year N] [--force]
+//   node dist/cli.js freeze [FILE] [--db DB] [--from D --to D --dir DATA_DIR] [--unfreeze]
+//   node dist/cli.js reparse-check DATA_DIR --db DB
 //   node dist/cli.js view FILE [--view all|entries|projects]
 //   node dist/cli.js report DATA_DIR --db DB [--period P] [--from D] [--to D] [--project N]... [--prefix P]... [--category C] [--format text|json]
 //   node dist/cli.js suggest DATA_DIR --db DB
 //   node dist/cli.js editor FOLDER [--db DB] [--viewer DIR] [--backups DIR] [--host H] [--port N]
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { DEFAULT_PATTERNS, convertFolder } from "./node/batch";
+import { dayFilesInRange, freezeFile, reparseCheck, snapshotsDirFor } from "./node/freeze";
 import { createEditorServer, Workspace } from "./node/editorServer";
 import { loadDatabaseFile, syncSuggestions } from "./node/projectsFile";
 import { parseDay } from "./core/parser";
@@ -26,7 +29,11 @@ class UsageError extends Error {}
 const USAGE = `usage: node dist/cli.js <command> [arguments]
 
   parse FILE [--projects DB] [--year N]          parse one day file (or stdin) to JSON
-  convert IN_DIR [OUT_DIR] [--pattern P]...     convert every day file in a folder to JSON
+  convert IN_DIR [OUT_DIR] [--pattern P]... [--projects DB] [--year N] [--force]
+                                                 convert every day file in a folder to JSON
+  freeze [FILE] [--db DB] [--from D --to D --dir DATA_DIR] [--unfreeze]
+                                                 freeze a day file, or every day in a date range
+  reparse-check DATA_DIR --db DB                 parse the frozen files again and list what changed
   view FILE [--view all|entries|projects]        show a parser output file as text
   report DATA_DIR --db DB [options]              hours by period and by project
   suggest DATA_DIR --db DB                       add unregistered projects to the database
@@ -70,7 +77,12 @@ function command(name: string, args: string[]): number {
       const { values, positionals } = parseArgs({
         args,
         allowPositionals: true,
-        options: { pattern: { type: "string", multiple: true }, projects: { type: "string" }, year: { type: "string" } },
+        options: {
+          pattern: { type: "string", multiple: true },
+          projects: { type: "string" },
+          year: { type: "string" },
+          force: { type: "boolean" },
+        },
       });
       const inDir = positionals[0];
       if (!inDir) throw new UsageError("convert needs IN_DIR");
@@ -79,10 +91,15 @@ function command(name: string, args: string[]): number {
       const result = convertFolder(inDir, outDir, {
         patterns: values.pattern?.length ? values.pattern : DEFAULT_PATTERNS,
         projects,
+        projectsText: values.projects && existsSync(values.projects) ? readFileSync(values.projects, "utf-8") : undefined,
+        snapshotsDir: values.projects ? snapshotsDirFor(values.projects) : undefined,
         defaultYear: values.year ? Number(values.year) : undefined,
+        force: values.force ?? false,
       });
       for (const failure of result.failed) process.stderr.write(`error: ${failure.file} - ${failure.message}\n`);
-      process.stdout.write(`Converted ${result.written.length} file(s) into ${outDir}; ${result.failed.length} failed\n`);
+      process.stdout.write(
+        `Converted ${result.written.length} file(s) into ${outDir}; ${result.skipped.length} unchanged and skipped; ${result.failed.length} failed\n`,
+      );
       return result.failed.length ? 1 : 0;
     }
     case "view": {
@@ -148,6 +165,68 @@ function command(name: string, args: string[]): number {
       const count = syncSuggestions(dbPath, unregisteredSuggestions(records, db));
       process.stdout.write(`Wrote ${count} unregistered project(s) to ${dbPath}\n`);
       return 0;
+    }
+    case "freeze": {
+      const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: {
+          db: { type: "string", default: "data/projects.yml" },
+          from: { type: "string" },
+          to: { type: "string" },
+          dir: { type: "string" },
+          unfreeze: { type: "boolean" },
+        },
+      });
+      const file = positionals[0];
+      const db = values.db ?? "data/projects.yml";
+      const outcomes: string[] = [];
+      let failed = 0;
+      const files: string[] = [];
+      if (file) files.push(file);
+      if (values.from || values.to) {
+        if (!values.from || !values.to || !values.dir) throw new UsageError("a range needs --from, --to and --dir");
+        for (const day of dayFilesInRange(values.dir, values.from, values.to)) {
+          if (day.error) {
+            failed += 1;
+            process.stderr.write(`error: ${day.file} - ${day.error}\n`);
+          } else files.push(day.file);
+        }
+      }
+      if (!files.length && !failed) throw new UsageError("freeze needs FILE, or --from, --to and --dir");
+      for (const path of files) {
+        try {
+          const done = freezeFile(path, { projectsPath: db, unfreeze: values.unfreeze ?? false });
+          if (values.unfreeze) outcomes.push(`${path}: ${done.changed ? "unfrozen" : "not frozen"}`);
+          else
+            outcomes.push(
+              `${path}: ${done.changed ? "frozen" : "already frozen"} with ${done.snapshot}${done.snapshotCreated ? " (new snapshot)" : ""}`,
+            );
+        } catch (err) {
+          failed += 1;
+          process.stderr.write(`error: ${path} - ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+      }
+      for (const line of outcomes) process.stdout.write(line + "\n");
+      process.stdout.write(`${outcomes.length} file(s); ${failed} failed\n`);
+      return failed ? 1 : 0;
+    }
+    case "reparse-check": {
+      const { values, positionals } = parseArgs({
+        args,
+        allowPositionals: true,
+        options: { db: { type: "string" } },
+      });
+      const dataDir = positionals[0];
+      if (!dataDir) throw new UsageError("reparse-check needs DATA_DIR");
+      const entries = reparseCheck(dataDir, requireOption(values.db, "db"));
+      for (const entry of entries) {
+        process.stdout.write(`${entry.file}: ${entry.status}\n`);
+        for (const line of entry.lines) process.stdout.write(`  ${line}\n`);
+      }
+      const bad = entries.filter((entry) => entry.status !== "same").length;
+      process.stdout.write(`${entries.length} frozen file(s) checked; ${bad} with a difference or an error\n`);
+      return bad ? 1 : 0;
     }
     case "editor": {
       const { values, positionals } = parseArgs({

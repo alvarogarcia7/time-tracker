@@ -37,6 +37,8 @@ export function describeOutcome(outcome: SyncOutcome): string {
   const sent = outcome.pushed.length;
   const received = outcome.pulled.length;
   const parts = [`Synced ${outcome.checked} file${outcome.checked === 1 ? "" : "s"}: ${sent} sent, ${received} received.`];
+  if (outcome.removed.length) parts.push(`${outcome.removed.length} removed here because they were deleted on GitHub.`);
+  if (outcome.deleted.length) parts.push(`${outcome.deleted.length} deleted on GitHub because they were deleted here.`);
   for (const conflict of outcome.conflicts) {
     parts.push(
       `${conflict.name} changed on two devices. The other version is the file; this device's version is kept as ${conflict.copy}.`,
@@ -55,7 +57,7 @@ async function runSync(store: IdbStore, shell: Shell): Promise<{ message: string
     if (!navigator.onLine) return { message: "Offline: changes are kept on this device and sync when you are online.", isError: false };
     const remote = githubRepo({ owner: settings.owner, repo: settings.repo, token: settings.token });
     const outcome = await syncDays(syncLocal(store), remote, { device: settings.device, now: new Date() });
-    if (outcome.pushed.length || outcome.pulled.length || outcome.conflicts.length) shell.dataChanged();
+    if (outcome.pulled.length || outcome.conflicts.length || outcome.removed.length) shell.dataChanged();
     return { message: describeOutcome(outcome), isError: outcome.errors.length > 0 || outcome.conflicts.length > 0 };
   } catch (err) {
     return { message: `Sync failed: ${err instanceof Error ? err.message : String(err)}`, isError: true };

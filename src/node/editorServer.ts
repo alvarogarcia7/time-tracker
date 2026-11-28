@@ -4,7 +4,7 @@
 // same code the browser runs over IndexedDB. DiskStorage is the part that reads and writes files.
 import { createHash, randomBytes } from "node:crypto";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 
 import { headerDate } from "../core/dayFiles";
@@ -61,6 +61,28 @@ export class DiskStorage implements Storage {
     writeFileSync(temporary, next);
     renameSync(temporary, path);
     return { hash: digest(next) };
+  }
+
+  // Removes the day file and its JSON (<name>.json, when there is one), keeping both in the backup
+  // folder. The file is read again here, with no await before the removal, so the check and the removal
+  // see the same file.
+  async deleteDay(name: string, previous: DayFile): Promise<void> {
+    const path = join(this.folder, basename(name));
+    if (!isFile(path)) throw new StoreError(404, `${name}: not found in the editor folder`);
+    const data = readFileSync(path);
+    if (digest(data) !== previous.hash) {
+      throw new StoreError(409, `${name} changed on disk since it was opened; reload it before deleting`);
+    }
+    const stem = basename(name, extname(name));
+    const json = join(this.folder, `${stem}.json`);
+    const jsonData = isFile(json) ? readFileSync(json) : null;
+    this.keepBackup(name, data);
+    if (jsonData) {
+      mkdirSync(this.backups, { recursive: true });
+      writeFileSync(join(this.backups, `${stem}-${stamp()}.json`), jsonData);
+    }
+    if (jsonData) unlinkSync(json);
+    unlinkSync(path);
   }
 
   async createDay(name: string, text: string): Promise<{ hash: string }> {
@@ -181,6 +203,12 @@ export function createEditorServer(workspace: DayService, viewer: string): Serve
       const base = typeof body.base === "string" ? body.base : null;
       return sendJson(response, 200, await workspace.write(name, body.text, base));
     }
+    if (method === "DELETE" && path === "/api/file") {
+      const body = await jsonBody(request);
+      const base = typeof body.base === "string" ? body.base : null;
+      await workspace.delete(name, base);
+      return sendJson(response, 200, { name });
+    }
     if (method === "POST" && path === "/api/file") {
       const body = await jsonBody(request);
       if (typeof body.name !== "string" || typeof body.text !== "string") {
@@ -203,7 +231,7 @@ export function createEditorServer(workspace: DayService, viewer: string): Serve
     if (method === "POST" && path === "/api/projects") {
       const body = await jsonBody(request);
       if (typeof body.name !== "string") throw new StoreError(400, 'body must be {"name": "..."}');
-      return sendJson(response, 200, await workspace.createProject(body.name));
+      return sendJson(response, 200, await workspace.createProject(body.name, body.category === "personal" || body.category === "professional" ? body.category : undefined));
     }
     if (method === "GET" && path === "/api/vocabulary") {
       return sendJson(response, 200, { descriptions: await workspace.vocabulary() });

@@ -178,10 +178,11 @@ test("an open entry has no minutes", () => {
 });
 
 test("an ambiguous description stops the load and names the file", () => {
-  const text = JSON.stringify(parseDay("#toggl 11/11\n- [ ] 0800 gym lost\n", { defaultYear: 2026, parsedAt: "x" }));
+  const text = JSON.stringify(parseDay("#toggl 11/11\n- [ ] 0800 gym fun\n", { defaultYear: 2026, parsedAt: "x" }));
+  const clash = loadDatabase("gym: [gym]\nfun: [fun]\n");
 
   assert.throws(
-    () => recordsFromFiles([{ name: "1.json", text }], DB),
+    () => recordsFromFiles([{ name: "1.json", text }], clash),
     (err: unknown) => err instanceof TimeParseError && /1\.json: .*matches several projects/.test((err as Error).message),
   );
 });

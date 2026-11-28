@@ -113,6 +113,11 @@ export function githubRepo(options: GitHubOptions) {
       const data = await request("PUT", `/contents/${encodeURIComponent(name)}`, body);
       return { sha: String(data.content.sha) };
     },
+
+    // Deletes the file. sha is the blob sha the deletion is based on; a file changed since fails (409).
+    async delete(name: string, sha: string, message: string): Promise<void> {
+      await request("DELETE", `/contents/${encodeURIComponent(name)}`, { message, sha });
+    },
   };
 }
 

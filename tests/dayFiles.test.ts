@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { chooseDayFile, dayListEntries, dayWithWeekday, fileInUrl, headerDate, localDay, newestFirst, shortcutFiles, urlWithFile } from "../src/core/dayFiles";
+import { chooseDayFile, dayListEntries, dayWithWeekday, fileInUrl, headerDate, localDay, markdownPickMessage, newestFirst, shortcutFiles, urlWithFile } from "../src/core/dayFiles";
 
 test("the date of a day file is read from its header, with or without a tag and a year", () => {
   assert.equal(headerDate("#toggl 11/11\n- [ ] 0800 a\n", 2026), "2026-11-11");
@@ -77,4 +77,12 @@ test("the day list holds the files that parse and the day files that fail, marke
     { name: "b.md", failed: true },
     { name: "c.md", failed: false },
   ]);
+});
+
+test("the Viewer says a Markdown day file is picked from the day list, and accepts other files", () => {
+  assert.equal(
+    markdownPickMessage("2026-11-11.MD"),
+    "2026-11-11.MD is a Markdown day file. The Viewer reads parser output JSON: choose the day from the day list instead.",
+  );
+  assert.equal(markdownPickMessage("11-11.json"), null);
 });

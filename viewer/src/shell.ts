@@ -5,7 +5,7 @@ import type { TimeEntryDay } from "@core/summary";
 import { urlWithFile } from "@core/dayFiles";
 import { EditorApi, StoreError } from "@core/workspace";
 
-export type TabName = "editor" | "viewer" | "reports" | "projects" | "settings";
+export type TabName = "editor" | "mobile" | "viewer" | "reports" | "fix" | "projects" | "settings";
 
 export interface DayFile {
   name: string;
@@ -40,6 +40,9 @@ export interface Shell {
   selectedFile(): string | null;
   selectFile(name: string): void;
   onSelectFile(listener: () => void): void;
+  // Open a day file in the editor at a line (a link from Reports). The editor opens the file and shows the line.
+  revealLine(name: string, line: number): void;
+  onRevealLine(listener: (name: string, line: number) => void): void;
   // Day files or the database changed under the page (a sync or an import): tabs reload what they show.
   dataChanged(): void;
   onDataChanged(listener: () => void): void;
@@ -49,6 +52,7 @@ export function createShell(api: EditorApi): Shell {
   let selected: string | null = null;
   const listeners: (() => void)[] = [];
   const changeListeners: (() => void)[] = [];
+  const revealListeners: ((name: string, line: number) => void)[] = [];
   return {
     api,
     current: null,
@@ -66,6 +70,12 @@ export function createShell(api: EditorApi): Shell {
     },
     onSelectFile(listener) {
       listeners.push(listener);
+    },
+    revealLine(name, line) {
+      for (const listener of revealListeners) listener(name, line);
+    },
+    onRevealLine(listener) {
+      revealListeners.push(listener);
     },
     dataChanged() {
       for (const listener of changeListeners) listener();

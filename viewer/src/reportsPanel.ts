@@ -1,10 +1,19 @@
 // The reports panel: choose the period, range, projects and category, and see the hours.
-import { colorsForProjects } from "@core/summary";
+import { TaskItem, colorsForProjects, groupByProject, totals, withPrefixes } from "@core/summary";
 import type { Controller, Shell } from "./shell";
+import { breakdownTable } from "./breakdownView";
+import { durationByDay } from "./durationByDay";
+import { shareBlocks } from "./shareView";
+import { sunburstBlock } from "./sunburstView";
 import {
   CATEGORIES,
+  CONFIGURATIONS,
   Category,
+  DEFAULT_PERIOD,
+  DEFAULT_PRESET,
   Database,
+  EntryRecord,
+  Filters,
   LoadedDay,
   PERIODS,
   PRESETS,
@@ -14,17 +23,42 @@ import {
   Report,
   buildReport,
   checkSelection,
+  configurationFor,
   localDay,
   loadDatabase,
+  movePeriod,
+  presetForPeriod,
   presetRange,
   rangeLabel,
   recordsFromFiles,
+  selectRecords,
+  skippedFile,
+  skippedLine,
 } from "@core/reports";
+import { dayTotals, daysBetween } from "@core/week";
 
 interface State {
   db: Database | null;
   files: LoadedDay[];
-  errors: string[]; // day files that did not parse
+  errors: string[]; // day files that did not parse, as shown under Skipped files
+}
+
+// Opens a day file in the editor at a line: the Editor tab, then the file and line.
+function openInEditor(shell: Shell, name: string, line: number): void {
+  shell.openTab("editor");
+  shell.revealLine(name, line);
+}
+
+// A link that opens a day file in the editor, without a line.
+export function dayLink(shell: Shell, name: string, text: string = name): HTMLAnchorElement {
+  const link = el("a", null, text);
+  link.href = "#";
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    shell.openTab("editor");
+    shell.selectFile(name);
+  });
+  return link;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string | null, text?: string): HTMLElementTagNameMap[K] {
@@ -73,7 +107,40 @@ function bar(percent: number, color: string): HTMLElement {
   return track;
 }
 
-function renderReport(report: Report, range: string): HTMLElement {
+// The selected records as the viewer shows them: the share of time, the duration by day over the days of the
+// range, the project and task breakdown, and the sunburst. The colours cover every project and its parents (see
+// withPrefixes). The breakdown's open rows are kept in expanded; toggle opens or closes one.
+function selectionViews(
+  records: EntryRecord[],
+  days: string[],
+  colors: Map<string, string>,
+  expanded: ReadonlySet<string>,
+  toggle: (path: string) => void,
+): HTMLElement {
+  const wrap = el("div");
+  const items: TaskItem[] = records.map((record) => ({
+    project: record.project,
+    duration_minutes: record.minutes,
+    description: record.description,
+  }));
+  wrap.append(el("h3", null, "Project distribution"));
+  wrap.append(...shareBlocks(items, colors));
+  if (!records.length) {
+    wrap.append(el("p", "muted", "No projects in this selection."));
+    return wrap;
+  }
+  wrap.append(el("h3", null, "Duration by day"));
+  const chart = el("div", "week-card");
+  chart.append(...durationByDay(dayTotals(records, days), groupByProject(items).map((group) => group.project), colors));
+  wrap.append(chart);
+  wrap.append(el("h3", null, "Project and task breakdown"));
+  wrap.append(breakdownTable(items, totals(items).minutes, colors, { expanded, toggle }));
+  wrap.append(el("h3", null, "Sunburst of the times"));
+  wrap.append(sunburstBlock(items, colors));
+  return wrap;
+}
+
+function renderReport(report: Report, range: string, shell: Shell, share: HTMLElement, colors: Map<string, string>): HTMLElement {
   const wrap = el("div", "report");
   const totals = report.totals;
   const scope: string[] = [];
@@ -115,7 +182,6 @@ function renderReport(report: Report, range: string): HTMLElement {
   wrap.append(periods);
 
   wrap.append(el("h3", null, "Hours per project"));
-  const colors = colorsForProjects(report.by_project.map((p) => p.project));
   const maxProject = Math.max(0, ...report.by_project.map((p) => p.hours));
   const projects = el("div", "rows");
   for (const row of report.by_project) {
@@ -135,11 +201,36 @@ function renderReport(report: Report, range: string): HTMLElement {
   }
   if (!report.by_project.length) projects.append(el("p", "muted", "No projects in this selection."));
   wrap.append(projects);
+  wrap.append(share);
 
   if (report.skipped.length) {
     wrap.append(el("h3", null, "Skipped files"));
     const list = el("ul", "muted small");
-    for (const item of report.skipped) list.append(el("li", null, item));
+    for (const item of report.skipped) {
+      const entry = el("li");
+      const file = skippedFile(item);
+      if (file) {
+        // The file name opens the day; the line, when the item has one, opens the file at that line.
+        entry.append(dayLink(shell, file));
+        const rest = item.slice(file.length);
+        const target = skippedLine(item);
+        const head = target ? /^: line \d+/i.exec(rest)?.[0] : undefined;
+        if (target && head) {
+          const lineLink = el("a", null, head);
+          lineLink.href = "#";
+          lineLink.addEventListener("click", (event) => {
+            event.preventDefault();
+            openInEditor(shell, file, target.line);
+          });
+          entry.append(lineLink, rest.slice(head.length));
+        } else {
+          entry.append(rest);
+        }
+      } else {
+        entry.textContent = item;
+      }
+      list.append(entry);
+    }
     wrap.append(list);
   }
   return wrap;
@@ -273,10 +364,12 @@ function tokenEditor(placeholder: string, suggestions: () => string[]): TokenEdi
 // The reports tab. Its days and database come from the shell, and are read again each time the tab is shown.
 export function mountReports(root: HTMLElement, shell: Shell): Controller {
   const state: State = { db: null, files: [], errors: [] };
+  const expanded = new Set<string>(); // project rows open in the breakdown
 
   const periodSelect = select(PERIODS);
-  periodSelect.value = "monthly";
+  periodSelect.value = DEFAULT_PERIOD;
   const presetSelect = select(PRESETS, PRESET_LABELS);
+  presetSelect.value = DEFAULT_PRESET;
   const fromInput = dateInput();
   const toInput = dateInput();
   const projectEditor = tokenEditor("type or pick a project", () => (state.db ? ["unknown", ...state.db.keys()] : []));
@@ -287,15 +380,35 @@ export function mountReports(root: HTMLElement, shell: Shell): Controller {
   const status = el("p", "muted small");
   const result = el("div");
 
+  // Previous and next move from and to together, by one period of the period control.
+  const previous = el("button", null, "Previous");
+  previous.type = "button";
+  const next = el("button", null, "Next");
+  next.type = "button";
+  const dates = el("div", "date-range");
+  dates.append(previous, labelled("From", fromInput), labelled("To", toInput), next);
+
+  // Basic configurations, hidden in an accordion.
+  const configurations = el("details", "configurations");
+  configurations.append(el("summary", null, "Basic configurations"));
+  const configButtons = el("div", "config-buttons");
+  for (const config of CONFIGURATIONS) {
+    const button = el("button", null, config.label);
+    button.type = "button";
+    button.addEventListener("click", () => applyConfiguration(config.name));
+    configButtons.append(button);
+  }
+  configurations.append(configButtons);
+
   const form = el("div", "form");
   form.append(
     labelled("Period", periodSelect),
     labelled("Range", presetSelect),
-    labelled("From", fromInput),
-    labelled("To", toInput),
+    dates,
     labelled("Projects", projectEditor.element),
     labelled("Prefixes", prefixEditor.element),
     labelled("Category", categorySelect),
+    configurations,
   );
   const files = el("div", "form");
   files.append(labelled("Project database (projects.yml)", dbInput), labelled("Day files (.json)", dayInput));
@@ -306,6 +419,12 @@ export function mountReports(root: HTMLElement, shell: Shell): Controller {
   function describe(): void {
     const dbText = state.db ? `${state.db.size} projects` : "no project database";
     status.textContent = `${dbText} · ${state.files.length} day file(s)`;
+  }
+
+  function toggleProject(path: string): void {
+    if (expanded.has(path)) expanded.delete(path);
+    else expanded.add(path);
+    run();
   }
 
   function run(): void {
@@ -326,19 +445,19 @@ export function mountReports(root: HTMLElement, shell: Shell): Controller {
       checkSelection(state.db, names, prefixes, category);
       const { records, skipped } = recordsFromFiles(state.files, state.db);
       skipped.push(...state.errors);
-      const report = buildReport(
-        records,
-        periodSelect.value as Period,
-        {
-          start: fromInput.value || undefined,
-          end: toInput.value || undefined,
-          names,
-          prefixes,
-          category,
-        },
-        skipped,
-      );
-      result.append(renderReport(report, rangeLabel(fromInput.value || null, toInput.value || null)));
+      const filters: Filters = {
+        start: fromInput.value || undefined,
+        end: toInput.value || undefined,
+        names,
+        prefixes,
+        category,
+      };
+      const report = buildReport(records, periodSelect.value as Period, filters, skipped);
+      const { chosen, start: first, end: last } = selectRecords(records, filters);
+      const days = first && last ? daysBetween(first, last) : [];
+      const colors = colorsForProjects(withPrefixes(chosen.map((record) => record.project)));
+      const views = selectionViews(chosen, days, colors, expanded, toggleProject);
+      result.append(renderReport(report, rangeLabel(fromInput.value || null, toInput.value || null), shell, views, colors));
     } catch (err) {
       const box = el("div", "error", err instanceof Error ? err.message : String(err));
       result.append(box);
@@ -379,14 +498,40 @@ export function mountReports(root: HTMLElement, shell: Shell): Controller {
   });
 
   // A preset fills from and to, counted from today.
-  presetSelect.addEventListener("change", () => {
-    const range = presetRange(presetSelect.value as Preset, localDay(new Date()));
+  function applyPreset(preset: Preset): void {
+    const range = presetRange(preset, localDay(new Date()));
     if (range) {
       fromInput.value = range.start;
       toInput.value = range.end;
     }
+  }
+  applyPreset(DEFAULT_PRESET);
+  presetSelect.addEventListener("change", () => {
+    applyPreset(presetSelect.value as Preset);
     run();
   });
+
+  // A configuration sets the range and the category together.
+  function applyConfiguration(name: string): void {
+    const config = configurationFor(name, localDay(new Date()));
+    presetSelect.value = config.preset;
+    categorySelect.value = config.category;
+    fromInput.value = config.start;
+    toInput.value = config.end;
+    run();
+  }
+
+  // Moves from and to by one period; the dates no longer match a preset, so the range is custom.
+  function shift(count: number): void {
+    if (!fromInput.value || !toInput.value) return;
+    const moved = movePeriod({ start: fromInput.value, end: toInput.value }, periodSelect.value as Period, count);
+    fromInput.value = moved.start;
+    toInput.value = moved.end;
+    presetSelect.value = "custom";
+    run();
+  }
+  previous.addEventListener("click", () => shift(-1));
+  next.addEventListener("click", () => shift(1));
   // Changing from or to by hand makes the range custom.
   for (const control of [fromInput, toInput]) {
     control.addEventListener("change", () => {
@@ -394,9 +539,13 @@ export function mountReports(root: HTMLElement, shell: Shell): Controller {
       run();
     });
   }
-  for (const control of [periodSelect, categorySelect]) {
-    control.addEventListener("change", run);
-  }
+  // A period brings the range that fits it: this week for daily and weekly, this month for monthly, and so on.
+  periodSelect.addEventListener("change", () => {
+    presetSelect.value = presetForPeriod(periodSelect.value as Period);
+    applyPreset(presetSelect.value as Preset);
+    run();
+  });
+  categorySelect.addEventListener("change", run);
   projectEditor.onChange(run);
   prefixEditor.onChange(run);
 

@@ -5,9 +5,9 @@ import { createToday, openApp, today, waitForServiceWorker } from "./helpers";
 
 test("@smoke every page opens, and today's day file is created with its text", async ({ page }) => {
   await openApp(page);
-  for (const tab of ["Viewer", "Reports", "Projects", "Settings", "Editor"]) {
-    await page.getByRole("tab", { name: tab }).click();
-    await expect(page.getByRole("tab", { name: tab })).toHaveAttribute("aria-selected", "true");
+  for (const tab of ["Editor mobile", "Viewer", "Reports", "Files to fix", "Projects", "Settings", "Editor"]) {
+    await page.getByRole("tab", { name: tab, exact: true }).click();
+    await expect(page.getByRole("tab", { name: tab, exact: true })).toHaveAttribute("aria-selected", "true");
   }
 
   await page.getByRole("tab", { name: "Viewer" }).click();
@@ -15,13 +15,13 @@ test("@smoke every page opens, and today's day file is created with its text", a
   await expect(page.getByRole("button", { name: "Week", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Day", exact: true }).click();
 
-  await page.getByRole("tab", { name: "Editor" }).click();
+  await page.getByRole("tab", { name: "Editor", exact: true }).click();
   const file = await createToday(page);
   expect(file).toBe(today().file);
   await expect(page.locator("#status")).toContainText(`Created ${file}`);
 
   await page.getByRole("button", { name: "Plain text", exact: true }).click();
-  await expect(page.locator("#plain-text")).toHaveValue(`${today().header}\n- [ ] \n`);
+  await expect(page.locator("#plain-text")).toHaveValue(`${today().header}\n# Date, description, project:b:c\n- [ ] \n`);
 });
 
 test("@smoke three entries are computed, saved, and still there after a reload", async ({ page }) => {
@@ -67,9 +67,49 @@ test("@smoke after the first visit the app and the saved day load offline", asyn
 
   await context.setOffline(true);
   await page.reload();
-  await expect(page.getByRole("tab", { name: "Editor" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Editor", exact: true })).toBeVisible();
   await expect(page.locator("#editor-file")).toHaveValue(file);
   await page.getByRole("button", { name: "Plain text", exact: true }).click();
   await expect(page.locator("#plain-text")).toHaveValue(`${today().header}\n- [ ] 0900 offline check\n- [ ] 1000 end\n`);
   await context.setOffline(false);
+});
+
+test("@smoke the back and forward buttons move between the tabs", async ({ page }) => {
+  await openApp(page);
+  await page.getByRole("tab", { name: "Reports" }).click();
+  await page.getByRole("tab", { name: "Projects" }).click();
+  await expect(page).toHaveURL(/#projects$/);
+
+  await page.goBack();
+  await expect(page.getByRole("tab", { name: "Reports" })).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(/#reports$/);
+  await page.goBack();
+  await expect(page.getByRole("tab", { name: "Editor", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.goForward();
+  await expect(page.getByRole("tab", { name: "Reports" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("Save of a file that does not parse says so instead of Saved.", async ({ page }) => {
+  await openApp(page);
+  await createToday(page);
+  await page.getByRole("button", { name: "Plain text", exact: true }).click();
+  await page.locator("#plain-text").fill(`${today().header}\n- [ ] 6am loading buses\n`);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator("#status")).toContainText("Saved, but the file does not parse");
+});
+
+test("a project added on the Projects tab is in the Entries project list without a reload", async ({ page }) => {
+  await openApp(page);
+  await createToday(page);
+  await page.getByRole("button", { name: "Plain text", exact: true }).click();
+  await page.locator("#plain-text").fill(`${today().header}\n- [ ] 0900 lift\n`);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("tab", { name: "Projects", exact: true }).click();
+  await page.locator("#new-name").fill("gym");
+  await page.locator("#add-project").click();
+  await expect(page.locator("#add-message")).toContainText("Added gym");
+  await page.getByRole("tab", { name: "Editor", exact: true }).click();
+  await page.getByRole("button", { name: "Entries", exact: true }).click();
+  await page.getByPlaceholder("pick a project").first().click();
+  await expect(page.locator("ul.suggestions:not(.hidden) li")).toHaveText(["gym"]);
 });

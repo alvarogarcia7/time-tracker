@@ -3,7 +3,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { githubRepo, GitHubError, decodeBase64, encodeBase64 } from "../src/core/github";
-import { conflictName, syncDays, SyncedState, SyncLocal } from "../src/core/sync";
+import { conflictName, planOneSided, syncDays, SyncedState, SyncLocal } from "../src/core/sync";
 import { sha256Hex } from "../src/core/hash";
 
 const OWNER = "alice";
@@ -52,6 +52,13 @@ class FakeGitHub {
       const size = new TextEncoder().encode(existing.text).length;
       return json(200, { type: "file", name, path: name, sha: existing.sha, size, encoding: "base64", content: encodeBase64(existing.text) });
     }
+    if (method === "DELETE") {
+      if (!existing) return json(404, { message: "Not Found" });
+      const body = JSON.parse(String(init?.body));
+      if (existing.sha !== body.sha) return json(409, { message: "conflict" });
+      this.files.delete(name);
+      return json(200, { content: null, commit: {} });
+    }
     if (method === "PUT") {
       if (this.rejectPutFor.has(name)) return json(500, { message: "Server Error" });
       const body = JSON.parse(String(init?.body));
@@ -96,8 +103,14 @@ class MemoryLocal implements SyncLocal {
     if (this.days.has(name)) throw new Error(`${name}: exists`);
     this.days.set(name, text);
   }
-  async remove(name: string) {
+  async remove(name: string, expectedText: string) {
+    if (this.days.get(name) !== expectedText) return false;
+    this.backups.push(expectedText);
     this.days.delete(name);
+    return true;
+  }
+  async forget(name: string) {
+    this.state.delete(name);
   }
   async synced() {
     return new Map(this.state);
@@ -233,6 +246,7 @@ describe("sync of the day files", () => {
     const racing = {
       list: () => remote.list(),
       put: (name: string, text: string, sha: string | null, message: string) => remote.put(name, text, sha, message),
+      delete: (name: string, sha: string, message: string) => remote.delete(name, sha, message),
       get: async (name: string) => {
         laptop.days.set(name, DAY + "- [ ] 1400 saved during sync\n");
         return remote.get(name);
@@ -325,5 +339,90 @@ describe("reading a file whose text is not in the contents answer", () => {
   test("an empty file is empty text", async () => {
     const fetcher = answer({ type: "file", name: "e.md", sha: "b5", size: 0, encoding: "base64", content: "" });
     assert.equal((await client(fetcher as never).get("e.md")).text, "");
+  });
+});
+
+describe("a deleted day is carried into sync", () => {
+  test("a day that exists on one side is pushed or pulled while it is new, and deleted on the other side once it was synced", () => {
+    const known: SyncedState = { hash: "h", sha: "s" };
+    assert.equal(planOneSided("local", undefined, true), "push");
+    assert.equal(planOneSided("remote", undefined, true), "pull");
+    assert.equal(planOneSided("local", known, false), "delete-local");
+    assert.equal(planOneSided("remote", known, false), "delete-remote");
+  });
+
+  test("a side that changed since the last sync keeps its version: the edit is sent, or the change is fetched", () => {
+    const known: SyncedState = { hash: "h", sha: "s" };
+    assert.equal(planOneSided("local", known, true), "push");
+    assert.equal(planOneSided("remote", known, true), "pull");
+  });
+
+  test("a day deleted on this device is deleted on GitHub, and does not come back on the next sync", async () => {
+    const gh = new FakeGitHub();
+    const phone = new MemoryLocal();
+    const laptop = new MemoryLocal();
+    phone.days.set("2026-11-25.md", DAY);
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+
+    phone.days.delete("2026-11-25.md"); // deleted in the Editor
+    const outcome = await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    assert.deepEqual(outcome.deleted, ["2026-11-25.md"]);
+    assert.deepEqual([outcome.pushed, outcome.pulled, outcome.errors], [[], [], []]);
+    assert.equal(gh.files.has("2026-11-25.md"), false);
+
+    const again = await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    assert.deepEqual([again.pushed, again.pulled, again.deleted, again.removed], [[], [], [], []]);
+    assert.equal(phone.days.has("2026-11-25.md"), false);
+  });
+
+  test("a deletion made on another device removes the day here, and keeps the text as a backup", async () => {
+    const gh = new FakeGitHub();
+    const phone = new MemoryLocal();
+    const laptop = new MemoryLocal();
+    phone.days.set("2026-11-25.md", DAY);
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+
+    phone.days.delete("2026-11-25.md");
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+
+    const outcome = await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+    assert.deepEqual(outcome.removed, ["2026-11-25.md"]);
+    assert.equal(laptop.days.has("2026-11-25.md"), false);
+    assert.deepEqual(laptop.backups, [DAY]);
+    assert.deepEqual(outcome.errors, []);
+  });
+
+  test("a day deleted here but edited on GitHub since the last sync is fetched again, not lost", async () => {
+    const gh = new FakeGitHub();
+    const phone = new MemoryLocal();
+    const laptop = new MemoryLocal();
+    phone.days.set("2026-11-25.md", DAY);
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+
+    laptop.days.set("2026-11-25.md", DAY + "- [ ] 1200 laptop edit\n");
+    await syncDays(laptop, gh.remote(), { device: "Laptop", now: NOW });
+
+    phone.days.delete("2026-11-25.md");
+    const outcome = await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    assert.deepEqual(outcome.pulled, ["2026-11-25.md"]);
+    assert.deepEqual(outcome.deleted, []);
+    assert.equal(phone.days.get("2026-11-25.md"), DAY + "- [ ] 1200 laptop edit\n");
+  });
+
+  test("a day deleted on this device and on GitHub leaves no sync state behind, so a new file of that name is sent", async () => {
+    const gh = new FakeGitHub();
+    const phone = new MemoryLocal();
+    phone.days.set("2026-11-25.md", DAY);
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    phone.days.delete("2026-11-25.md");
+    await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+
+    phone.days.set("2026-11-25.md", DAY);
+    const outcome = await syncDays(phone, gh.remote(), { device: "Phone", now: NOW });
+    assert.deepEqual(outcome.pushed, ["2026-11-25.md"]);
+    assert.equal(gh.files.get("2026-11-25.md")?.text, DAY);
   });
 });

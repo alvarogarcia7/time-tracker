@@ -19,10 +19,13 @@ import {
   noDayFileNotice,
   addEntryLabel,
   PROJECT_PLACEHOLDER,
+  lineAnnotations,
   timeCellText,
   TIME_HEADER_HINT,
   reloadPrompt,
-  savedNotice,
+  deleteConfirmation,
+  nextDayAfter,
+  savedMessage,
   isUnsaved,
   statusLead,
   joinLines,
@@ -34,6 +37,7 @@ import {
   verifyProjectChange,
   withProject,
 } from "@core/editorModel";
+import { matchingProjects } from "@core/mobileEditor";
 
 interface FileInfo {
   name: string;
@@ -51,7 +55,9 @@ interface DayEntry {
   reference: { start: string; line: number } | null;
 }
 
-type ParseResult = { ok: true; day: { entries: DayEntry[]; tag: string | null } } | { ok: false; error: string };
+type ParseResult =
+  | { ok: true; day: { entries: DayEntry[]; tag: string | null } }
+  | { ok: false; error: string; line: number | null; entries: DayEntry[] };
 
 interface State {
   files: FileInfo[];
@@ -321,7 +327,8 @@ async function save(): Promise<void> {
   state.base = saved.hash;
   state.parse = saved.parse as unknown as ParseResult;
   render();
-  showStatus(savedNotice, false);
+  const message = savedMessage(state.parse);
+  showStatus(message.text, message.isError);
 }
 
 // A new day file: the name is the date (YYYY-MM-DD.md) and the first line is the header DD/MM/YYYY.
@@ -337,7 +344,7 @@ async function createDay(): Promise<void> {
   const name = `${value}.md`;
   let message: string;
   try {
-    await api.create(name, `${day}/${month}/${year}\n- [ ] \n`);
+    await api.create(name, `${day}/${month}/${year}\n# Date, description, project:b:c\n- [ ] \n`);
     message = `Created ${name}.`;
   } catch (err) {
     if (statusOf(err) !== 409) {
@@ -361,6 +368,41 @@ export function localDate(date: Date): string {
 async function reload(): Promise<void> {
   if (dirty() && !window.confirm(reloadPrompt(state.name))) return;
   await open(state.name, true);
+}
+
+// Deletes the open day file (and its JSON, when there is one) after a confirmation. Both are kept as
+// backups. The page then shows the next file, or none, and the viewer's day list is read again.
+async function deleteDay(): Promise<void> {
+  const name = state.name;
+  if (!name || !window.confirm(deleteConfirmation(name, dirty()))) return;
+  try {
+    await api.delete(name, state.base);
+  } catch (err) {
+    const note = statusOf(err) === 409 ? " Use Reload to see the file on disk." : "";
+    showStatus(`${errorText(err)}${note}`, true);
+    return;
+  }
+  // The open file is cleared before the viewer is told, so the change listener below does not read it again.
+  state.name = "";
+  state.files = await api.files();
+  shell?.dataChanged();
+  // The deleted name goes back into the sorted list, so the next file is the one that followed it.
+  const next = nextDayAfter([...state.files.map((file) => file.name), name].sort(), name);
+  if (next) {
+    await open(next, true);
+    showStatus(`Deleted ${name}.`, false);
+  } else {
+    state.text = "";
+    state.saved = "";
+    state.base = "";
+    state.parse = null;
+    state.good = [];
+    state.notice = null;
+    setFileInput("");
+    shell?.selectFile("");
+    render();
+    showStatus(`Deleted ${name}. No day files are left in this folder.`, false);
+  }
 }
 
 // ---- parsing and editing ------------------------------------------------------
@@ -404,9 +446,12 @@ function setText(text: string): void {
   render();
 }
 
-// The computed start and end of each line, when the whole file parses.
+// The computed start and end of each line: all of them when the whole file parses, otherwise
+// the lines above the first error.
 function entryAt(index: number): DayEntry | undefined {
-  return state.parse?.ok ? state.parse.day.entries.find((entry) => entry.line === index + 1) : undefined;
+  if (!state.parse) return undefined;
+  const entries = state.parse.ok ? state.parse.day.entries : state.parse.entries;
+  return entries.find((entry) => entry.line === index + 1);
 }
 
 // The project of an entry comes from its description, so the browser can work it out even
@@ -444,6 +489,7 @@ function renderStatus(): void {
     node.classList.remove("error");
   }
   (byId("save") as HTMLButtonElement).disabled = !dirty();
+  (byId("delete") as HTMLButtonElement).disabled = !state.name;
 }
 
 // ---- dropdown for a single value ------------------------------------------------
@@ -585,6 +631,8 @@ function renderEntries(): void {
         setText(joinLines(setLine(lines, index, input.value.trim())));
       });
       cell.append(input);
+      // A bad header is the line that failed: its error shows here, and no entry row is marked.
+      if (state.parse?.ok === false && state.parse.line === index + 1) cell.append(el("div", "error small", state.parse.error));
       row.append(cell);
       body.append(row);
       return;
@@ -623,7 +671,8 @@ function renderEntries(): void {
 
 function entryRow(lines: string[], index: number, time: string, description: string): HTMLElement {
   const entry = entryAt(index);
-  const row = el("tr", entry ? null : "unparsed"); // unparsed: no start and end while the file has an error
+  const failed = state.parse?.ok === false && state.parse.line === index + 1 ? state.parse : null;
+  const row = el("tr", failed ? "unparsed" : null); // only the line that failed is marked
   row.dataset.line = String(index);
   row.addEventListener(
     "keydown",
@@ -644,7 +693,8 @@ function entryRow(lines: string[], index: number, time: string, description: str
   );
   row.append(el("td", "muted", String(index + 1)));
   row.append(el("td", null, entry?.start ?? "-"));
-  row.append(el("td", null, entry ? entry.end ?? "open" : "-"));
+  // An open end means the last entry of a file that parses; above an error the end is unknown.
+  row.append(el("td", null, entry ? entry.end ?? (state.parse?.ok ? "open" : "-") : "-"));
 
   const timeCell = el("td");
   timeCell.dataset.col = "time";
@@ -664,6 +714,7 @@ function entryRow(lines: string[], index: number, time: string, description: str
     ),
   );
   if (entry?.reference) descriptionCell.append(el("div", "muted small", `copies ${entry.description}`));
+  if (failed) descriptionCell.append(el("div", "error small", failed.error));
   row.append(descriptionCell);
 
   const projectTd = projectCell(lines, index, description);
@@ -735,6 +786,15 @@ async function chooseProject(lines: string[], index: number, value: string): Pro
   if (parsed.kind !== "task") return;
   const base = entryAt(index)?.description ?? parsed.description;
   const created = Boolean(value) && !state.db?.has(value);
+  if (created) {
+    // A name typed in the cell is a new project: ask first, naming the projects it may have been meant for.
+    const similar = matchingProjects([...(state.db?.keys() ?? [])], value, 3);
+    const hint = similar.length ? ` Did you mean ${similar.join(", ")}?` : "";
+    if (!confirm(`Add “${value}” as a new project?${hint}`)) {
+      render();
+      return;
+    }
+  }
   if (created && !(await createProject(value))) {
     render();
     return;
@@ -762,6 +822,31 @@ async function chooseProject(lines: string[], index: number, value: string): Pro
 function renderPlain(): void {
   const area = byId("plain-text") as HTMLTextAreaElement;
   if (document.activeElement !== area && area.value !== state.text) area.value = state.text;
+  renderLineSides();
+}
+
+// The line number and the project of each line, beside the textarea. Rebuilt from the text on each change.
+function renderLineSides(): void {
+  const entries = state.parse ? (state.parse.ok ? state.parse.day.entries : state.parse.entries) : [];
+  const rows = lineAnnotations(state.text, state.db, entries);
+  const numbers = byId("plain-numbers");
+  const projects = byId("plain-projects");
+  numbers.replaceChildren(...rows.map((row) => el("div", null, String(row.number))));
+  projects.replaceChildren(
+    ...rows.map((row) => {
+      const cell = el("div", null, row.project);
+      if (row.error) cell.title = row.error;
+      return cell;
+    }),
+  );
+  syncLineSides();
+}
+
+// The side columns scroll with the textarea.
+function syncLineSides(): void {
+  const scrollTop = (byId("plain-text") as HTMLTextAreaElement).scrollTop;
+  byId("plain-numbers").scrollTop = scrollTop;
+  byId("plain-projects").scrollTop = scrollTop;
 }
 
 // The parsed day of the open file, for the viewer tab.
@@ -781,6 +866,22 @@ function render(): void {
   if (state.view === "entries") renderEntries();
   else renderPlain();
   restoreFocus();
+}
+
+// Opens a file at a line, in the plain text view, with the line selected.
+async function reveal(name: string, line: number): Promise<void> {
+  if (name !== state.name) {
+    if (!confirmDiscard()) return;
+    await open(name, true);
+    if (state.name !== name) return; // could not open it
+  }
+  state.view = "plain";
+  render();
+  const lines = state.text.split("\n");
+  const start = lines.slice(0, Math.max(0, line - 1)).reduce((sum, text) => sum + text.length + 1, 0);
+  const area = byId("plain-text") as HTMLTextAreaElement;
+  area.focus();
+  area.setSelectionRange(start, start + (lines[line - 1]?.length ?? 0));
 }
 
 // ---- mounting ---------------------------------------------------------------
@@ -812,9 +913,20 @@ export function mountEditor(root: HTMLElement, sharedShell: Shell): Controller {
       if (state.name && state.name !== name) sharedShell.selectFile(state.name); // could not open it
     })();
   });
+  // A link from Reports: the file opens (after the usual check for unsaved changes) with the line shown.
+  sharedShell.onRevealLine((name, line) => void reveal(name, line));
   const controller: Controller = {
     show: () => {
       active = true;
+      // The projects may have changed on the Projects tab (or by a sync) since this tab was last shown.
+      void (async () => {
+        try {
+          state.db = loadDatabase((await api.projects()).text, "projects.yml");
+          render();
+        } catch {
+          // No database, or one that does not load: the list keeps what it had.
+        }
+      })();
     },
     hide: () => {
       active = false;
@@ -828,6 +940,7 @@ export function mountEditor(root: HTMLElement, sharedShell: Shell): Controller {
   byId("create-day").addEventListener("click", () => void createDay());
   (byId("new-day") as HTMLInputElement).value = localDate(new Date());
   byId("reload").addEventListener("click", () => void reload());
+  byId("delete").addEventListener("click", () => void deleteDay());
   byId("tab-entries").addEventListener("click", () => {
     state.view = "entries";
     render();
@@ -846,6 +959,7 @@ export function mountEditor(root: HTMLElement, sharedShell: Shell): Controller {
   });
   const area = byId("plain-text") as HTMLTextAreaElement;
   area.addEventListener("input", () => setText(area.value));
+  area.addEventListener("scroll", syncLineSides);
   // Enter at the end of an entry adds the next entry, as the + button does in the entries view.
   // Enter anywhere else keeps the usual line break.
   area.addEventListener("keydown", (event) => {

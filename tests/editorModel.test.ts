@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  deleteConfirmation,
+  nextDayAfter,
   matchesFilters,
   buildLine,
   classify,
@@ -13,6 +15,7 @@ import {
   noDayFileNotice,
   addEntryLabel,
   PROJECT_PLACEHOLDER,
+  savedMessage,
   timeCellText,
   TIME_HEADER_HINT,
   reloadPrompt,
@@ -27,6 +30,7 @@ import {
   splitLines,
   verifyProjectChange,
   withProject,
+  lineAnnotations,
 } from "../src/core/editorModel";
 import { loadDatabase } from "../src/core/reports";
 
@@ -164,21 +168,27 @@ test("setLine replaces any line, and headerIndex finds the first non-blank line"
   assert.equal(headerIndex([""]), -1);
 });
 
-test("withProject adds the project's first keyword when the description does not give it", () => {
-  assert.deepEqual(withProject("watch tv", "gym", DB), { description: "watch tv gym" });
+test("a # comment line is not an entry for the editor", () => {
+  assert.equal(classify("# Date, description, project:b:c").kind, "other");
+});
+
+test("withProject adds ', project' at the end when the description does not give the project", () => {
+  assert.deepEqual(withProject("watch tv", "gym", DB), { description: "watch tv, gym" });
+  assert.deepEqual(withProject("lost wash", "gym", DB), { description: "lost wash, gym" });
   assert.deepEqual(withProject("", "gym", DB), { description: "gym" });
+});
+
+test("withProject writes the keyword as the tag, never as a prefix", () => {
+  assert.deepEqual(withProject("wash dishes", "lost", DB), { description: "wash dishes, lost" });
+  assert.deepEqual(withProject("gym: wash dishes", "lost", DB), { description: "gym: wash dishes, lost" });
 });
 
 test("withProject leaves a description unchanged when it already gives the project", () => {
   assert.deepEqual(withProject("workout", "gym", DB), { description: "workout" });
 });
 
-test("withProject reports the clash when the new keyword gives two projects", () => {
-  const result = withProject("shared", "shared2", DB);
-
-  assert.equal(result.description, undefined);
-  assert.match(result.error ?? "", /shared2/);
-  assert.match(result.error ?? "", /shared1/);
+test("withProject writes the tag, so a description that names another project is not a clash", () => {
+  assert.deepEqual(withProject("shared", "shared2", DB), { description: "shared, other" });
 });
 
 test("withProject refuses a project without keywords", () => {
@@ -224,22 +234,22 @@ test("matchesFilters combines both filters", () => {
   assert.equal(matchesFilters("unknown", null, both), false);
 });
 
-test("withProject replaces the keyword of a keyword split instead of adding one", () => {
-  assert.deepEqual(withProject("lost: wash", "gym", DB), { description: "gym: wash" });
+test("withProject replaces the comma tag, including one that matches no project", () => {
   assert.deepEqual(withProject("wash, lost", "gym", DB), { description: "wash, gym" });
+  assert.deepEqual(withProject("wash, nothing", "gym", DB), { description: "wash, gym" });
 });
 
 // ---- a project whose keywords hold separators -------------------------------------
 
 const TLS_DB = loadDatabase('"client-a:TLS":\n  keywords:\n    - "TLS: product discussion with Sam"\n    - "TLS"\n');
 
-test("withProject adds a keyword without a separator, not the long one with a colon", () => {
-  assert.deepEqual(withProject("standup", "client-a:TLS", TLS_DB), { description: "standup TLS" });
-  assert.deepEqual(withProject("", "client-a:TLS", TLS_DB), { description: "TLS" });
+test("withProject writes the first keyword; a colon in a keyword is fine in a tag", () => {
+  assert.deepEqual(withProject("standup", "client-a:TLS", TLS_DB), { description: "standup, TLS: product discussion with Sam" });
+  assert.deepEqual(withProject("", "client-a:TLS", TLS_DB), { description: "TLS: product discussion with Sam" });
 });
 
-test("withProject refuses a project whose keywords all hold a separator", () => {
-  const db = loadDatabase('"client-a:TLS":\n  keywords: ["TLS: product discussion"]\n');
+test("withProject refuses a project whose keywords all hold a comma", () => {
+  const db = loadDatabase('"client-a:TLS":\n  keywords: ["TLS, product discussion"]\n');
 
   assert.match(withProject("standup", "client-a:TLS", db).error ?? "", /has no keyword without/);
 });
@@ -264,11 +274,17 @@ test("verifyProjectChange refuses a line that would not show the chosen project"
   assert.match(verifyProjectChange(before, before, 1, "client-a:TLS", TLS_DB) ?? "", /would show unknown, not client-a:TLS/);
 });
 
-test("withProject on a child project writes the keyword of the project above it", () => {
+test("withProject on a child project writes its own keyword, which is a whole tag", () => {
   const db = loadDatabase('"car:maintainance":\n  keywords: ["car:maintainance"]\ncar:\n  keywords: [car]\n');
 
-  assert.deepEqual(withProject("oil change", "car:maintainance", db), { description: "oil change car" });
-  assert.deepEqual(withProject("", "car:maintainance", db), { description: "car" });
+  assert.deepEqual(withProject("oil change", "car:maintainance", db), { description: "oil change, car:maintainance" });
+  assert.deepEqual(withProject("", "car:maintainance", db), { description: "car:maintainance" });
+});
+
+test("withProject on a child project without its own keyword writes the keyword of the project above it", () => {
+  const db = loadDatabase('"car:maintainance":\n  keywords: []\ncar:\n  keywords: [car]\n');
+
+  assert.deepEqual(withProject("oil change", "car:maintainance", db), { description: "oil change, car" });
 });
 
 test("a save reports plain 'Saved.' with no folder path", () => {
@@ -279,4 +295,45 @@ test("the file is unsaved as soon as a cell has typed text that is not committed
   assert.equal(isUnsaved("a", "a", false), false);
   assert.equal(isUnsaved("a", "a", true), true);
   assert.equal(isUnsaved("b", "a", false), true);
+});
+
+test("lineAnnotations gives each line its number and the project the entries table shows for it", () => {
+  const text = "11/11\n- [ ] 8 workout\nnote line\n- [ ] 9 lost\n- [ ] 10 nothing here\n";
+  assert.deepEqual(lineAnnotations(text, DB), [
+    { number: 1, project: "" }, // the header
+    { number: 2, project: "gym" },
+    { number: 3, project: "" }, // not an entry
+    { number: 4, project: "lost" },
+    { number: 5, project: "" }, // an entry with no project
+    { number: 6, project: "" },
+  ]);
+});
+
+test("lineAnnotations takes a reference's project from the description the parser gave it", () => {
+  const text = "11/11\n- [ ] 8 workout\n- [ ] 8\n";
+  const entries = [
+    { line: 2, description: "workout" },
+    { line: 3, description: "workout" },
+  ];
+  assert.equal(lineAnnotations(text, DB, entries)[2].project, "gym");
+  assert.equal(lineAnnotations(text, DB)[2].project, "");
+});
+
+test("the delete confirmation names the day file and its JSON, and warns about unsaved changes", () => {
+  assert.equal(deleteConfirmation("12-11.md", false), "Delete 12-11.md and 12-11.json (if there is one) from the folder? Both are kept as backups.");
+  assert.match(deleteConfirmation("12-11.md", true), /unsaved changes are lost/);
+});
+
+test("after a delete the next file in the list is shown, else the previous one, else none", () => {
+  assert.equal(nextDayAfter(["11-11.md", "12-11.md", "13-11.md"], "12-11.md"), "13-11.md");
+  assert.equal(nextDayAfter(["11-11.md", "12-11.md"], "12-11.md"), "11-11.md");
+  assert.equal(nextDayAfter(["12-11.md"], "12-11.md"), null);
+});
+
+test("a save of a file that does not parse is not reported as plain Saved", () => {
+  assert.deepEqual(savedMessage({ ok: true }), { text: "Saved.", isError: false });
+  assert.deepEqual(savedMessage({ ok: false, error: "line 3: invalid time '6am'" }), {
+    text: "Saved, but the file does not parse: line 3: invalid time '6am'",
+    isError: true,
+  });
 });

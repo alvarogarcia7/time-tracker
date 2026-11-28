@@ -4,6 +4,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  DEFAULT_PERIOD,
+  DEFAULT_PRESET,
+  PERIODS,
+  presetForPeriod,
   EntryRecord,
   addDays,
   buildReport,
@@ -13,6 +17,7 @@ import {
   periodKey,
   recordsFromFiles,
   splitList,
+  uncategorizedDetails,
 } from "../src/core/reports";
 
 // Paths are relative to dist-test/, where the bundled tests run.
@@ -72,8 +77,8 @@ test("detectProject matches whole words ignoring case, and refuses two projects"
   assert.equal(detectProjectInDb("lostness", db), "unknown");
   assert.equal(detectProjectInDb("call Client-A Team", db), "client-a");
 
-  const clash = loadDatabase("a: [shared]\nb: [other]\n");
-  assert.throws(() => detectProjectInDb("shared other", clash), /matches several projects: a, b/);
+  const clash = loadDatabase("a: [alpha]\nb: [bravo]\n");
+  assert.throws(() => detectProjectInDb("alpha bravo", clash), /matches several projects: a, b/);
 });
 
 // ---- periods ----------------------------------------------------------------
@@ -232,4 +237,28 @@ test("weekly report for professional projects matches the Python report", () => 
     buildReport(records, "weekly", { category: "professional" }, skipped),
     fixture("report-weekly-professional.json"),
   );
+});
+
+test("each period brings the range that fits it, and daily shows the current week", () => {
+  assert.equal(DEFAULT_PERIOD, "daily");
+  assert.equal(DEFAULT_PRESET, "this-week");
+  assert.deepEqual(
+    PERIODS.map((period) => presetForPeriod(period)),
+    ["this-week", "this-week", "this-month", "this-quarter", "this-half", "this-year"],
+  );
+});
+
+test("the days without a category say which entry and why", () => {
+  const db = loadDatabase("work:\n  category: professional\n  keywords: [work]\nfree:\n  keywords: [free]\n");
+  const day = (text: string) => JSON.stringify({ date: "2026-11-12", parsed_at: "", original_text: "", parser_version: "", tag: null, schema: "", entries: JSON.parse(text) });
+  const entry = (start: string, end: string | null, description: string, project: string) =>
+    ({ line: 2, source: "", start, end, start_type: "absolute", time_expression: start, duration_minutes: end ? 30 : null, description, task: description, project, reference: null });
+  const files = [
+    { name: "a.json", text: day(JSON.stringify([entry("09:00", "09:30", "emails, work", "work"), entry("09:30", "10:00", "xyzzy", "unknown"), entry("10:00", "10:30", "tidy, free", "free"), entry("10:30", null, "", "unknown")])) },
+    { name: "b.json", text: day(JSON.stringify([entry("09:00", "09:30", "emails, work", "work")])) },
+  ];
+
+  assert.deepEqual(uncategorizedDetails(files, db), [
+    { name: "a.json", reasons: ["09:30: “xyzzy” has no project", "10:00: project free has no category", "10:30: an empty entry"] },
+  ]);
 });

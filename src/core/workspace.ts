@@ -3,11 +3,12 @@
 // does the checks that must match everywhere: the file names, the base-hash conflict check, the
 // project database checks, and the parse.
 import { TimeParseError } from "./errors";
-import { ParsedDay, parseDay } from "./parser";
-import { keywordsOf, loadDatabase } from "./reports";
+import { ParsedDay, ParsedEntry, entriesBeforeLine, parseDay } from "./parser";
+import { Category, keywordsOf, loadDatabase } from "./reports";
 import { addProjectText } from "./projectsText";
 
-export type ParseResult = { ok: true; day: ParsedDay } | { ok: false; error: string };
+// A file that does not parse gives its error, the line it is on, and the entries above that line.
+export type ParseResult = { ok: true; day: ParsedDay } | { ok: false; error: string; line: number | null; entries: ParsedEntry[] };
 
 export interface DayFileInfo {
   name: string;
@@ -51,6 +52,9 @@ export interface Storage {
   // null when there is no such day file.
   readDay(name: string): Promise<DayFile | null>;
   writeDay(name: string, text: string, previous: DayFile): Promise<{ hash: string }>;
+  // Removes the day file (and its JSON, where the storage has one) and keeps both as backups. Throws
+  // StoreError 409 when the stored text is no longer previous.text, checked in the same step as the removal.
+  deleteDay(name: string, previous: DayFile): Promise<void>;
   createDay(name: string, text: string): Promise<{ hash: string }>;
   // null when there is no database.
   readDatabase(): Promise<DatabaseFile | null>;
@@ -72,11 +76,12 @@ export interface EditorApi {
   files(): Promise<DayFileInfo[]>;
   read(name: string): Promise<DayFile>;
   write(name: string, text: string, base: string | null): Promise<{ name: string; hash: string; parse: ParseResult }>;
+  delete(name: string, base: string | null): Promise<void>;
   create(name: string, text: string): Promise<{ name: string; hash: string; parse: ParseResult }>;
   parse(text: string): Promise<ParseResult>;
   projects(): Promise<DatabaseFile>;
   saveProjects(text: string, base: string | null): Promise<{ hash: string }>;
-  createProject(name: string): Promise<{ name: string; keywords: string[] }>;
+  createProject(name: string, category?: Category): Promise<{ name: string; keywords: string[] }>;
   vocabulary(): Promise<string[]>;
   days(): Promise<{ files: { name: string; text: string }[]; errors: { name: string; message: string }[] }>;
 }
@@ -105,6 +110,16 @@ export class DayService implements EditorApi {
     return { name, hash: saved.hash, parse: await this.parse(text) };
   }
 
+  // Deletes the day file if it still has the version the editor read (base is its hash). The file
+  // and its backups are the storage's business.
+  async delete(name: string, base: string | null): Promise<void> {
+    const current = await this.read(name);
+    if (base !== current.hash) {
+      throw new StoreError(409, `${name} changed on disk since it was opened; reload it before deleting`);
+    }
+    await this.storage.deleteDay(name, current);
+  }
+
   // A new day file. It must not exist yet.
   async create(name: string, text: string): Promise<{ name: string; hash: string; parse: ParseResult }> {
     checkDayName(name);
@@ -124,12 +139,18 @@ export class DayService implements EditorApi {
     try {
       projects = await this.keywords();
     } catch (err) {
-      return { ok: false, error: `project database: ${messageOf(err)}` };
+      return { ok: false, error: `project database: ${messageOf(err)}`, line: null, entries: [] };
     }
     try {
       return { ok: true, day: parseDay(text, { projects }) };
     } catch (err) {
-      if (err instanceof TimeParseError) return { ok: false, error: err.message };
+      if (err instanceof TimeParseError) {
+        // The error starts with "line N:"; the entries above that line still show their times.
+        const line = /^line (\d+):/.exec(err.message);
+        const number = line ? Number(line[1]) : null;
+        const entries = number ? entriesBeforeLine(text, number, { projects }) : [];
+        return { ok: false, error: err.message, line: number, entries };
+      }
       throw err;
     }
   }
@@ -156,11 +177,11 @@ export class DayService implements EditorApi {
   }
 
   // A new project is added to the text read here, and written only if that text is still stored.
-  async createProject(name: string): Promise<{ name: string; keywords: string[] }> {
+  async createProject(name: string, category?: Category): Promise<{ name: string; keywords: string[] }> {
     const current = await this.projects();
     let added;
     try {
-      added = addProjectText(current.text, name, undefined, this.storage.databaseLabel);
+      added = addProjectText(current.text, name, undefined, this.storage.databaseLabel, category);
     } catch (err) {
       throw new StoreError(400, messageOf(err));
     }

@@ -1,0 +1,19 @@
+# Runs the same checks as `make check` and `make test` on every merge request and on the default branch.
+image: node:22
+
+stages: [check]
+
+test:
+  stage: check
+  # The project's runner only takes jobs tagged int (it does not run untagged jobs).
+  tags: [int]
+  cache:
+    key: npm-$CI_COMMIT_REF_SLUG
+    paths: [node_modules/]
+  script:
+    - npm ci
+    - npm run check
+    - npm test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

@@ -158,6 +158,17 @@ describe("editor server", () => {
     assert.match(data.error, /line 2/);
   });
 
+  test("a parse error names its line and gives the entries above it", async () => {
+    const { data } = await call("POST", "/api/parse", { text: "#toggl 11/11\n- [ ] 0800 X\n- [ ] 0900 gym\n- [ ] 2500 bad\n" });
+
+    assert.equal(data.ok, false);
+    assert.equal(data.line, 4);
+    assert.deepEqual(data.entries.map((e: { line: number; start: string; end: string | null }) => [e.line, e.start, e.end]), [
+      [2, "08:00", "09:00"],
+      [3, "09:00", null],
+    ]);
+  });
+
   test("the projects endpoint returns the database text and its hash", async () => {
     const { data } = await call("GET", "/api/projects");
 

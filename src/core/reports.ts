@@ -6,7 +6,7 @@ import { parseDescription } from "./description";
 
 import { Entry, TimeEntryDay, UNKNOWN_PROJECT, validate } from "./summary";
 
-export const PERIODS = ["daily", "weekly", "monthly", "quarterly", "yearly"] as const;
+export const PERIODS = ["daily", "weekly", "monthly", "quarterly", "half", "yearly"] as const;
 export type Period = (typeof PERIODS)[number];
 export const CATEGORIES = ["personal", "professional"] as const;
 export type Category = (typeof CATEGORIES)[number];
@@ -83,7 +83,8 @@ export function keywordsOf(db: Database): Map<string, string[]> {
   return new Map([...db.values()].map((project) => [project.name, project.keywords]));
 }
 
-// Reads the database: each project with its keywords and optional category.
+// Reads the database: each project with its keywords and optional category. A project without a category
+// takes its nearest parent's.
 // YAML 1.1 rules , so an unquoted "no" is a key of false and is refused.
 export function loadDatabase(text: string, source = "projects.yml"): Database {
   let data: unknown;
@@ -126,9 +127,25 @@ export function loadDatabase(text: string, source = "projects.yml"): Database {
   }
   const db: Database = new Map();
   for (const [name, words] of keywords) {
-    db.set(name, { name, keywords: words, category: categoryOf.get(name) ?? null });
+    db.set(name, { name, keywords: words, category: categoryOf.get(name) ?? inheritedCategory(name, categoryOf) });
   }
   return db;
+}
+
+// The category of the nearest project above this name that has one: a:b:c takes a:b's, then a's.
+function inheritedCategory(name: string, categoryOf: Map<string, Category | null>): Category | null {
+  const parts = name.split(":");
+  for (let length = parts.length - 1; length > 0; length--) {
+    const category = categoryOf.get(parts.slice(0, length).join(":"));
+    if (category) return category;
+  }
+  return null;
+}
+
+// The category a new project gets: the nearest ancestor's, or null when none has one.
+export function categoryForNew(db: Database, name: string): Category | null {
+  const categoryOf = new Map([...db].map(([key, project]) => [key, project.category] as const));
+  return inheritedCategory(name.trim(), categoryOf);
 }
 
 // Why a new project cannot be added to the database, in words for the form; null when it can.
@@ -153,6 +170,13 @@ export interface LoadedDay {
   text: string;
 }
 
+// The project database a frozen day file recorded (its projects_text), or null for a live file.
+function frozenProjects(doc: TimeEntryDay): Database | null {
+  const fields = doc as unknown as { frozen?: unknown; projects_text?: unknown; projects_source?: unknown };
+  if (fields.frozen !== true || typeof fields.projects_text !== "string") return null;
+  return loadDatabase(fields.projects_text, typeof fields.projects_source === "string" ? fields.projects_source : "frozen day");
+}
+
 // Each file is parsed and checked. Files that are not day outputs are skipped and listed.
 export function recordsFromFiles(files: LoadedDay[], db: Database): { records: EntryRecord[]; skipped: string[] } {
   const records: EntryRecord[] = [];
@@ -174,10 +198,12 @@ export function recordsFromFiles(files: LoadedDay[], db: Database): { records: E
       skipped.push(`${file.name}: bad date ${JSON.stringify(doc.date)}`);
       continue;
     }
+    // A frozen file is matched with the projects it recorded; a live file with the current database.
+    const fileDb = frozenProjects(doc) ?? db;
     for (const entry of doc.entries as Entry[]) {
       let project: string;
       try {
-        project = parseDescription(entry.description, keywordsOf(db)).project;
+        project = parseDescription(entry.description, keywordsOf(fileDb)).project;
       } catch (err) {
         fail(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -187,7 +213,7 @@ export function recordsFromFiles(files: LoadedDay[], db: Database): { records: E
         minutes: entry.duration_minutes,
         description: entry.description,
         project,
-        category: db.get(project)?.category ?? null,
+        category: fileDb.get(project)?.category ?? null,
       });
     }
   }
@@ -234,6 +260,8 @@ export function periodKey(day: string, period: Period): string {
       return `${year}-${String(month).padStart(2, "0")}`;
     case "quarterly":
       return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
+    case "half":
+      return `${year}-H${month <= 6 ? 1 : 2}`;
     case "yearly":
       return String(year);
   }
@@ -279,22 +307,25 @@ export function rangeLabel(from: string | null, to: string | null): string {
   return "no range chosen";
 }
 
+// The records a report covers: those that pass the filters, within the range. With no from or to, the
+// range is the first and last day of the chosen records.
+export function selectRecords(records: EntryRecord[], filters: Filters = {}): { chosen: EntryRecord[]; start?: string; end?: string } {
+  const picked = records.filter((record) => selected(record, filters));
+  const days = picked.map((record) => record.day);
+  const start = filters.start ?? (days.length ? days.reduce((a, b) => (b < a ? b : a)) : undefined);
+  const end = filters.end ?? (days.length ? days.reduce((a, b) => (b > a ? b : a)) : undefined);
+  if (start !== undefined && end !== undefined && start > end) {
+    fail(`from ${start} is after to ${end}`);
+  }
+  if (start === undefined || end === undefined) return { chosen: picked, start, end };
+  return { chosen: picked.filter((record) => record.day >= start && record.day <= end), start, end };
+}
+
 export function buildReport(records: EntryRecord[], period: Period, filters: Filters = {}, skipped: string[] = []): Report {
   if (!(PERIODS as readonly string[]).includes(period)) {
     fail(`unknown period "${period}"`);
   }
-  let chosen = records.filter((record) => selected(record, filters));
-  const days = chosen.map((record) => record.day);
-  let start = filters.start ?? (days.length ? days.reduce((a, b) => (b < a ? b : a)) : undefined);
-  let end = filters.end ?? (days.length ? days.reduce((a, b) => (b > a ? b : a)) : undefined);
-  if (start !== undefined && end !== undefined && start > end) {
-    fail(`from ${start} is after to ${end}`);
-  }
-  if (start !== undefined && end !== undefined) {
-    const from = start;
-    const to = end;
-    chosen = chosen.filter((record) => record.day >= from && record.day <= to);
-  }
+  const { chosen, start, end } = selectRecords(records, filters);
 
   const keys: string[] = [];
   if (start !== undefined && end !== undefined) {
@@ -358,7 +389,19 @@ export function buildReport(records: EntryRecord[], period: Period, filters: Fil
   };
 }
 
-export const PRESETS = ["custom", "this-week", "last-week", "this-month", "last-month"] as const;
+export const PRESETS = [
+  "custom",
+  "this-week",
+  "last-week",
+  "this-month",
+  "last-month",
+  "this-quarter",
+  "last-quarter",
+  "this-half",
+  "last-half",
+  "this-year",
+  "last-year",
+] as const;
 export type Preset = (typeof PRESETS)[number];
 export const PRESET_LABELS: Record<Preset, string> = {
   custom: "Custom (from/to below)",
@@ -366,13 +409,49 @@ export const PRESET_LABELS: Record<Preset, string> = {
   "last-week": "Last week",
   "this-month": "This month",
   "last-month": "Last month",
+  "this-quarter": "This quarter",
+  "last-quarter": "Last quarter",
+  "this-half": "This half",
+  "last-half": "Last half",
+  "this-year": "This year",
+  "last-year": "Last year",
 };
+// The period and range the reports open on.
+export const DEFAULT_PERIOD: Period = "daily";
+export const DEFAULT_PRESET: Preset = "this-week";
+
+// The range a period starts with when it is chosen: the current week, month, quarter, half or year.
+// Daily shows the days of the current week.
+export function presetForPeriod(period: Period): Preset {
+  const presets: Record<Period, Preset> = {
+    daily: "this-week",
+    weekly: "this-week",
+    monthly: "this-month",
+    quarterly: "this-quarter",
+    half: "this-half",
+    yearly: "this-year",
+  };
+  return presets[period];
+}
 
 // Today's date in local time, as YYYY-MM-DD.
 export function localDay(date: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
+
+// A calendar span, in months: the period that holds today (offset 0) or the one before (offset -1).
+// Quarters are 3 months, halves 6 and years 12, and they start in January, April, July and October.
+const MONTH_SPANS: Partial<Record<Preset, { months: number; offset: number }>> = {
+  "this-month": { months: 1, offset: 0 },
+  "last-month": { months: 1, offset: -1 },
+  "this-quarter": { months: 3, offset: 0 },
+  "last-quarter": { months: 3, offset: -1 },
+  "this-half": { months: 6, offset: 0 },
+  "last-half": { months: 6, offset: -1 },
+  "this-year": { months: 12, offset: 0 },
+  "last-year": { months: 12, offset: -1 },
+};
 
 // The range a preset stands for, counted from today. Weeks run Monday to Sunday, like ISO weeks.
 // "custom" has no range of its own, so it returns null.
@@ -383,11 +462,65 @@ export function presetRange(preset: Preset, today: string): { start: string; end
     const start = preset === "this-week" ? monday : addDays(monday, -7);
     return { start, end: addDays(start, 6) };
   }
+  const span = MONTH_SPANS[preset];
+  if (!span) return null;
   const [year, month] = today.split("-").map(Number);
-  // Date.UTC handles month 0 and day 0 by rolling back into the previous month or year.
-  const first = preset === "this-month" ? new Date(Date.UTC(year, month - 1, 1)) : new Date(Date.UTC(year, month - 2, 1));
-  const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0));
+  // Date.UTC handles a month before January and a day 0 by rolling back into the previous month or year.
+  const firstMonth = Math.floor((month - 1) / span.months) * span.months + span.offset * span.months;
+  const first = new Date(Date.UTC(year, firstMonth, 1));
+  const last = new Date(Date.UTC(year, firstMonth + span.months, 0));
   return { start: formatDay(first), end: formatDay(last) };
+}
+
+// The last day of a month, counted as a day of the month, for a date in that month.
+function monthLength(year: number, monthIndex: number): number {
+  return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
+}
+
+// Moves a day by whole months. A last day of a month stays the last day of the target month; any other
+// day keeps its date, or the last day of a shorter month.
+function addMonths(day: string, count: number): string {
+  const [year, month, date] = day.split("-").map(Number);
+  const wasLast = date === monthLength(year, month - 1);
+  const target = new Date(Date.UTC(year, month - 1 + count, 1));
+  const targetYear = target.getUTCFullYear();
+  const targetMonth = target.getUTCMonth();
+  const length = monthLength(targetYear, targetMonth);
+  return formatDay(new Date(Date.UTC(targetYear, targetMonth, wasLast ? length : Math.min(date, length))));
+}
+
+// Moves a range by count periods of the period control: days, weeks (7 days), months, quarters (3 months),
+// halves (6 months) or years (12 months). Both from and to move, so the range keeps its length.
+export function movePeriod(range: { start: string; end: string }, period: Period, count: number): { start: string; end: string } {
+  const months: Record<Period, number | null> = { daily: null, weekly: null, monthly: 1, quarterly: 3, half: 6, yearly: 12 };
+  const days: Record<Period, number | null> = { daily: 1, weekly: 7, monthly: null, quarterly: null, half: null, yearly: null };
+  const dayStep = days[period];
+  if (dayStep !== null) {
+    return { start: addDays(range.start, dayStep * count), end: addDays(range.end, dayStep * count) };
+  }
+  const monthStep = (months[period] ?? 0) * count;
+  return { start: addMonths(range.start, monthStep), end: addMonths(range.end, monthStep) };
+}
+
+// The settings of a basic configuration: the range it selects and the category it sets.
+export interface Configuration {
+  name: string;
+  label: string;
+  preset: Preset;
+  category: Category;
+}
+
+export const CONFIGURATIONS: Configuration[] = [
+  { name: "work-this-week", label: "Work this week", preset: "this-week", category: "professional" },
+  { name: "work-last-week", label: "Work last week", preset: "last-week", category: "professional" },
+];
+
+export function configurationFor(name: string, today: string): { preset: Preset; category: Category; start: string; end: string } {
+  const config = CONFIGURATIONS.find((item) => item.name === name);
+  if (!config) fail(`unknown configuration "${name}"`);
+  const range = presetRange(config.preset, today);
+  if (!range) fail(`configuration "${name}" has no range`);
+  return { preset: config.preset, category: config.category, start: range.start, end: range.end };
 }
 
 export function splitList(values: string): string[] {
@@ -413,4 +546,44 @@ export function unregisteredSuggestions(records: EntryRecord[], db: Database): {
   }
   const key = (text: string) => text.toLowerCase();
   return [...groups.values()].sort((a, b) => b.minutes - a.minutes || (key(a.text) < key(b.text) ? -1 : key(a.text) > key(b.text) ? 1 : 0));
+}
+
+// The file and line a skipped item names, as "Name.md: line 3: ..." gives. Null for any other item.
+export function skippedLine(item: string): { name: string; line: number } | null {
+  const match = /^(.+\.md): line (\d+): /i.exec(item);
+  return match ? { name: match[1], line: Number(match[2]) } : null;
+}
+
+// The day file a skipped item names, with or without a line: "Name.md: ..." gives "Name.md". Null for any other item.
+export function skippedFile(item: string): string | null {
+  const match = /^(.+\.md): /i.exec(item);
+  return match ? match[1] : null;
+}
+
+// For each day file with an entry that has no category (no project, or a project without one), what is wrong,
+// one short sentence per entry. Files that do not read as days are left out (they are listed as skipped).
+export function uncategorizedDetails(files: LoadedDay[], db: Database): { name: string; reasons: string[] }[] {
+  const found: { name: string; reasons: string[] }[] = [];
+  for (const file of files) {
+    let records: EntryRecord[];
+    try {
+      records = recordsFromFiles([file], db).records;
+    } catch {
+      continue;
+    }
+    const reasons = records
+      .filter((record) => record.category === null)
+      .map((record) => {
+        if (record.project !== UNKNOWN_PROJECT) return `${record.start}: project ${record.project} has no category`;
+        const text = record.description.trim();
+        return text ? `${record.start}: “${text}” has no project` : `${record.start}: an empty entry`;
+      });
+    if (reasons.length) found.push({ name: file.name, reasons });
+  }
+  return found;
+}
+
+// The day files with an entry that has no category.
+export function uncategorizedFiles(files: LoadedDay[], db: Database): string[] {
+  return uncategorizedDetails(files, db).map((item) => item.name);
 }

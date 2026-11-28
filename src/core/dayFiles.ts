@@ -7,6 +7,13 @@ export interface DayFileInfo {
   date: string | null; // YYYY-MM-DD from the header, or null when the header is not a valid date
 }
 
+// The Viewer reads parser output JSON, so a Markdown day file dropped or picked there is not loaded:
+// the message says to choose that day from the folder's day list. Null for any other file.
+export function markdownPickMessage(name: string): string | null {
+  if (!/\.md$/i.test(name)) return null;
+  return `${name} is a Markdown day file. The Viewer reads parser output JSON: choose the day from the day list instead.`;
+}
+
 // The date the first non-empty line gives, as YYYY-MM-DD, or null. A header without a year uses defaultYear.
 export function headerDate(text: string, defaultYear: number): string | null {
   const line = text

@@ -135,11 +135,47 @@ export class IdbStore implements Storage {
     return (await this.replaceRowIfText("days", name, text, expectedText)) === "ok";
   }
 
-  // Removes a day file (only used for a conflict copy this sync created, before it was sent).
-  async deleteDay(name: string): Promise<void> {
-    await transact(this.db, ["days"], (tx) => {
-      tx.objectStore("days").delete(name);
+  // Removes a day row only while its stored text is still expectedText, and keeps that text as a backup.
+  // The check and the removal are one transaction, as for writes.
+  private removeRowIfText(name: string, expectedText: string): Promise<"ok" | "missing" | "changed"> {
+    const savedAt = this.now();
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(["days", "backups"], "readwrite");
+      let outcome: "ok" | "missing" | "changed" = "ok";
+      tx.oncomplete = () => resolve(outcome);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error("the change was not saved"));
+      const read = tx.objectStore("days").get(name);
+      read.onerror = () => reject(read.error);
+      read.onsuccess = () => {
+        const row = read.result as StoredText | undefined;
+        if (!row) {
+          outcome = "missing";
+          return;
+        }
+        if (row.text !== expectedText) {
+          outcome = "changed";
+          return;
+        }
+        tx.objectStore("days").delete(name);
+        tx.objectStore("backups").add({ name, text: expectedText, savedAt } satisfies StoredBackup);
+      };
     });
+  }
+
+  // Deletes a day file when it still has the version the editor read (the same check as a save). The text
+  // is kept as a backup.
+  async deleteDay(name: string, previous: DayFile): Promise<void> {
+    const outcome = await this.removeRowIfText(name, previous.text);
+    if (outcome === "missing") throw new StoreError(404, `${name}: not found in the editor folder`);
+    if (outcome === "changed") {
+      throw new StoreError(409, `${name} changed on disk since it was opened; reload it before deleting`);
+    }
+  }
+
+  // Removes a day file (used by the sync) only while it still reads as expectedText.
+  async removeDayUnlessChanged(name: string, expectedText: string): Promise<boolean> {
+    return (await this.removeRowIfText(name, expectedText)) === "ok";
   }
 
   // A new day file. An existing file of the same name is never replaced (the store refuses it).
@@ -238,6 +274,12 @@ export class IdbStore implements Storage {
       tx.objectStore("sync").put({ name, ...state });
     });
   }
+
+  async forgetSyncedState(name: string): Promise<void> {
+    await transact(this.db, ["sync"], (tx) => {
+      tx.objectStore("sync").delete(name);
+    });
+  }
 }
 
 // The sync's view of the day files: writes keep the previous version as a backup.
@@ -250,7 +292,8 @@ export function syncLocal(store: IdbStore): SyncLocal {
       return { text: file.text };
     },
     write: (name, text, expectedText) => store.replaceDayUnlessChanged(name, text, expectedText),
-    remove: (name) => store.deleteDay(name),
+    remove: (name, expectedText) => store.removeDayUnlessChanged(name, expectedText),
+    forget: (name) => store.forgetSyncedState(name),
     async create(name, text) {
       await store.createDay(name, text);
     },

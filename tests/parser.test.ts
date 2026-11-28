@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { TimeParseError, detectProject, parseDay, validateProjects, PARSER_VERSION, SCHEMA_REFERENCE } from "../src/core/parser";
+import { TimeParseError, detectProject, entriesBeforeLine, parseDay, validateProjects, PARSER_VERSION, SCHEMA_REFERENCE } from "../src/core/parser";
 import { keywordsOf, loadDatabase } from "../src/core/reports";
 
 const ROOT = join(__dirname, "..");
@@ -357,15 +357,21 @@ test("no match is unknown", () => {
   assert.equal(detectProject("anything", new Map()), "unknown");
 });
 
-test("a description matching two projects is rejected", () => {
+test("a description matching two unrelated projects with keywords of the same length is rejected", () => {
+  const projects = new Map([["first", ["alpha"]], ["second", ["bravo"]]]);
+
+  expectThrows(() => detectProject("alpha bravo", projects), /first, second/);
+});
+
+test("two unrelated projects that both match are an error, whatever the keyword lengths", () => {
   const projects = new Map([["first", ["shared"]], ["second", ["other"]]]);
 
-  expectThrows(() => detectProject("shared other", projects), /first, second/);
+  expectThrows(() => detectProject("shared other", projects), /matches several projects/);
 });
 
 test("the ambiguous entry reports its line", () => {
   expectThrows(
-    () => parse(dayWith("- [ ] 0800 shared other"), { projects: { first: ["shared"], second: ["other"] } }),
+    () => parse(dayWith("- [ ] 0800 alpha bravo"), { projects: { first: ["alpha"], second: ["bravo"] } }),
     /line 2/,
   );
 });
@@ -506,7 +512,7 @@ test("a malformed header is rejected", () => {
 });
 
 test("a second header is rejected", () => {
-  expectThrows(() => parse(dayWith("- [ ] 0800 a", "#toggl 12/11", "- [ ] 0900 b")), /only one day/);
+  expectThrows(() => parse(dayWith("- [ ] 0800 a", "12/11", "- [ ] 0900 b")), /only one day/);
 });
 
 test("empty input is rejected", () => {
@@ -526,6 +532,23 @@ test("blank lines and the empty placeholder are ignored", () => {
 
   assert.equal(entries.length, 1);
   assert.equal(entries[0].end, null);
+});
+
+test("a # comment line after the header is skipped, wherever it is", () => {
+  const day = parse("#toggl 11/11\n# Date, description, project:b:c\n- [ ] 0800 a, lost\n# lost, a note\n- [ ]\n", { projects: PROJECTS });
+
+  assert.deepEqual(day.entries.map((e) => [e.description, e.project]), [["a, lost", "lost"]]);
+  assert.equal(day.entries[0].line, 3);
+});
+
+test("a # line that looks like a header is a comment, not a second day", () => {
+  const day = parse(dayWith("- [ ] 0800 a, lost", "# Toggl 6/5 Partial"));
+
+  assert.equal(day.entries.length, 1);
+});
+
+test("the header itself may carry a # and is still the header", () => {
+  assert.equal(parse("# Toggl 11/11\n- [ ] 0800 a, lost\n").date, "2026-11-11");
 });
 
 test("a time without a description", () => {
@@ -611,4 +634,32 @@ test("a heading marker without a tag is a header: # 17/11", () => {
 test("a project and a project below it may share a keyword; unrelated projects may not", () => {
   assert.doesNotThrow(() => validateProjects({ car: ["car"], "car:maintainance": ["car:maintainance"] }));
   assert.throws(() => validateProjects({ drive: ["drive"], "blood drive": ["blood drive"] }), /overlaps/);
+});
+
+test("the entries above a bad line keep their start and end; the last one is open until the bad line", () => {
+  const text = "#toggl 11/11\n- [ ] 0800 a\n- [ ] 0900 b\n- [ ] 2500 bad\n- [ ] 1000 c\n";
+  const entries = entriesBeforeLine(text, 4, { projects: PROJECTS, now: NOW });
+  assert.deepEqual(entries.map((e) => [e.line, e.start, e.end, e.duration_minutes]), [
+    [2, "08:00", "09:00", 60],
+    [3, "09:00", null, null],
+  ]);
+  assert.deepEqual(entriesBeforeLine(text, 2, { projects: PROJECTS, now: NOW }), []);
+});
+
+test("a relative row above a bad line keeps the starts of the rows before it when its absolute time is below the cut", () => {
+  const first = "#toggl 11/11\n- [ ] 0900 a\n- [ ] 1000 b\n- [ ] -30 c\nbad line\n";
+  assert.deepEqual(entriesBeforeLine(first, 5, { projects: PROJECTS, now: NOW }).map((e) => [e.line, e.start]), [
+    [2, "09:00"],
+    [3, "10:00"],
+  ]);
+  const second = "#toggl 11/11\n- [ ] 0900 a\n- [ ] -30 b\nbad line\n- [ ] 1000 c\n";
+  assert.deepEqual(entriesBeforeLine(second, 4, { projects: PROJECTS, now: NOW }).map((e) => [e.line, e.start]), [
+    [2, "09:00"],
+  ]);
+});
+
+test("a bad first entry, or a file with only a bad line, gives no entries and no crash", () => {
+  assert.deepEqual(entriesBeforeLine("#toggl 11/11\n- [ ] 2500 bad\n- [ ] 1000 c\n", 2, { projects: PROJECTS, now: NOW }), []);
+  assert.deepEqual(entriesBeforeLine("bad line\n", 1, { projects: PROJECTS, now: NOW }), []);
+  assert.deepEqual(entriesBeforeLine("- [ ] 2500 bad\n", 1, { projects: PROJECTS, now: NOW }), []);
 });

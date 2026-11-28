@@ -1,7 +1,7 @@
 // Editing rules for the day files, without any DOM. The text is the only source of truth:
 // every change rebuilds a line of text, and the entries view reads the text back.
 import { Database, detectProjectInDb, keywordsOf } from "./reports";
-import { ancestorsOf, parseDescription, replaceKeyword } from "./description";
+import { ancestorsOf, parseDescription } from "./description";
 import { UNKNOWN_PROJECT } from "./summary";
 
 export interface TaskLine {
@@ -90,6 +90,13 @@ export function statusLead(dirty: boolean, hasParseError: boolean): string[] {
   return hasParseError ? [] : ["Saved"];
 }
 
+// The status after a save: "Saved.", or a warning when the saved text does not parse, because Save works on
+// any text and a file that does not parse shows no entries.
+export function savedMessage(parse: { ok: boolean; error?: string }): { text: string; isError: boolean } {
+  if (parse.ok) return { text: savedNotice, isError: false };
+  return { text: `Saved, but the file does not parse: ${parse.error ?? "unknown error"}`, isError: true };
+}
+
 // The status message when a typed day-file name opens nothing: none when no name is typed or some file matches.
 export function noDayFileNotice(typed: string, matchingFiles: number): string | null {
   const name = typed.trim();
@@ -118,6 +125,20 @@ export function timeCellText(token: string, start: string | null): string {
 // The tooltip on the TIME header: what a relative token such as -30 means.
 export const TIME_HEADER_HINT =
   "-30 means 30 minutes before the next absolute time.";
+
+// The one question asked before a day file is deleted: it names the day file and its JSON (which may not exist).
+export function deleteConfirmation(name: string, unsaved: boolean): string {
+  const json = `${name.replace(/\.md$/, "")}.json`;
+  return `Delete ${name} and ${json} (if there is one) from the folder? Both are kept as backups.${unsaved ? " The unsaved changes are lost too." : ""}`;
+}
+
+// The day file the editor shows after a delete: the next file in the list, else the previous one, else none.
+export function nextDayAfter(names: string[], deleted: string): string | null {
+  const index = names.indexOf(deleted);
+  const rest = names.filter((name) => name !== deleted);
+  if (index < 0) return rest[0] ?? null;
+  return rest[index] ?? rest[index - 1] ?? null;
+}
 
 // The one question asked before Reload throws away the unsaved edits to the open day.
 export function reloadPrompt(name: string): string {
@@ -165,17 +186,23 @@ export interface ProjectChange {
   error?: string;
 }
 
-// Choosing a project adds one of its keywords to the description, because the project comes
-// from the keywords. The keyword must not hold a separator (":" or ","), which would split the
-// description: a keyword such as "TLS: product discussion" gives the wrong task. If the description
-// already gives that project, nothing changes.
+// The text with ", keyword" at its end. Trailing spaces and commas of the text are dropped first.
+function joinTag(text: string, keyword: string): string {
+  const base = text.replace(/[\s,]+$/, "");
+  return base ? `${base}, ${keyword}` : keyword;
+}
+
+// Choosing a project writes one of its keywords as the comma tag at the end of the description, because
+// the project comes from that tag (or from a keyword found in the text). The keyword must not hold a comma,
+// which would split the tag. A description that already gives the project is unchanged. A comma tag that
+// gives another project, or none, is replaced; any other description gets ", keyword" at its end.
 export function withProject(description: string, project: string, db: Database): ProjectChange {
   if (!db.has(project)) return { error: `${project} is not in the project database; add it there first` };
-  // A keyword without ':' or ',' (see above). Its own keywords come first, then those of the projects above it:
+  // A keyword without a comma. Its own keywords come first, then those of the projects above it:
   // car:maintainance has the keyword car of project car, which also matches it.
   const candidates = [project, ...ancestorsOf(project)].flatMap((name) => db.get(name)?.keywords ?? []);
-  const keyword = candidates.find((word) => !/[:,]/.test(word));
-  if (!keyword) return { error: `${project} has no keyword without ':' or ','; add one to the project database` };
+  const keyword = candidates.find((word) => !word.includes(","));
+  if (!keyword) return { error: `${project} has no keyword without ','; add one to the project database` };
   let current: ReturnType<typeof parseDescription>;
   try {
     current = parseDescription(description, keywordsOf(db));
@@ -183,13 +210,9 @@ export function withProject(description: string, project: string, db: Database):
     return { error: err instanceof Error ? err.message : String(err) };
   }
   if (current.project === project) return { description };
-  // "kitchen: wash" becomes "gym: wash"; any other description gets the keyword added at the end.
-  const keywordSplit = current.form === "keyword-first" || current.form === "keyword-last";
-  const next = keywordSplit
-    ? replaceKeyword(description, current, keyword)
-    : description.trim()
-      ? `${description.trim()} ${keyword}`
-      : keyword;
+  const next = current.form === "tag" && current.tagAt !== undefined
+    ? joinTag(description.slice(0, current.tagAt), keyword)
+    : joinTag(description, keyword);
   try {
     if (detectProjectInDb(next, db) !== project) {
       return { error: `the description would not give ${project}; edit it by hand` };
@@ -239,4 +262,35 @@ export function matchesFilters(
   if (filters.category === "categorized" && category === null) return false;
   if (filters.category === "uncategorized" && category !== null) return false;
   return true;
+}
+
+export interface LineAnnotation {
+  number: number; // 1-based line number
+  project: string; // "" when the line is not an entry, or has no project
+  error?: string; // set when the project cannot be picked (an ambiguous description)
+}
+
+// The project beside each line of the plain text view. It is the project the entries table shows for
+// the same line: the description the parser gave a reference (such as "8"), otherwise the line's own
+// description. The header and lines that are not entries get no project.
+export function lineAnnotations(
+  text: string,
+  db: Database | null,
+  entries: readonly { line: number; description: string }[] = [],
+): LineAnnotation[] {
+  const lines = splitLines(text);
+  const header = headerIndex(lines);
+  const described = new Map(entries.map((entry) => [entry.line, entry.description]));
+  return lines.map((line, index) => {
+    const annotation: LineAnnotation = { number: index + 1, project: "" };
+    const parsed = classify(line);
+    if (!db || index === header || parsed.kind !== "task") return annotation;
+    try {
+      const project = detectProjectInDb(described.get(index + 1) ?? parsed.description, db);
+      annotation.project = project === UNKNOWN_PROJECT ? "" : project;
+    } catch (err) {
+      annotation.error = err instanceof Error ? err.message : String(err);
+    }
+    return annotation;
+  });
 }

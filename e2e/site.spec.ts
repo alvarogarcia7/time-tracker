@@ -47,7 +47,7 @@ test("the service worker registers and controls the page after a reload", async 
 test("a path the site does not have goes to the start page", async ({ page }) => {
   await page.goto("./some/deep/link");
   await expect(page).toHaveURL(/\/time-tracker\/index\.html/);
-  await expect(page.getByRole("tab", { name: "Editor" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Editor", exact: true })).toBeVisible();
 });
 
 test("no page scrolls sideways at a 375 pixel width", async ({ page }) => {
@@ -60,9 +60,9 @@ test("no page scrolls sideways at a 375 pixel width", async ({ page }) => {
 
   const overflow = async () =>
     page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-  for (const tab of ["Editor", "Viewer", "Reports", "Projects", "Settings"]) {
-    await page.getByRole("tab", { name: tab }).click();
-    await expect(page.getByRole("tab", { name: tab })).toHaveAttribute("aria-selected", "true");
+  for (const tab of ["Editor", "Editor mobile", "Viewer", "Reports", "Files to fix", "Projects", "Settings"]) {
+    await page.getByRole("tab", { name: tab, exact: true }).click();
+    await expect(page.getByRole("tab", { name: tab, exact: true })).toHaveAttribute("aria-selected", "true");
     expect(await overflow(), `${tab} scrolls sideways`).toBeLessThanOrEqual(0);
   }
 });

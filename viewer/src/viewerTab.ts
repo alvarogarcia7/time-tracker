@@ -1,15 +1,12 @@
 import {
   Entry,
   ProjectGroup,
-  ProjectNode,
   TimeEntryDay,
   axisFor,
   formatMinutes,
-  formatShare,
   groupByProject,
   hourTicks,
   projectColors,
-  projectTree,
   segmentsFor,
   tasksOf,
   TaskGroup,
@@ -17,7 +14,8 @@ import {
   validate,
 } from "@core/summary";
 import { addDays, localDay } from "@core/reports";
-import { dayListEntries } from "@core/dayFiles";
+import { dayListEntries, markdownPickMessage } from "@core/dayFiles";
+import { shareBlocks } from "./shareView";
 import { mondayOf, summarizeWeek } from "@core/week";
 import type { Controller, DaysResult, Shell } from "./shell";
 import { dot, el } from "./dom";
@@ -70,44 +68,11 @@ function renderStats(doc: TimeEntryDay, groups: ProjectGroup[]): HTMLElement {
   return row;
 }
 
-// One bar showing each project's share of tracked time, and below it the projects as a tree. A project
-// named a:b:c is listed under a:b, which is listed under a, and each row shows its total and its share.
-function renderShareBar(doc: TimeEntryDay, groups: ProjectGroup[], colors: Map<string, string>): HTMLElement {
+// The share of tracked time: one bar, and below it the projects as a tree (see shareView.ts).
+function renderShareBar(doc: TimeEntryDay, colors: Map<string, string>): HTMLElement {
   const section = el("section", "card");
-  section.append(el("h2", null, "Share of tracked time"));
-  const total = groups.reduce((sum, group) => sum + group.minutes, 0);
-  const bar = el("div", "share-bar");
-
-  for (const group of groups) {
-    if (group.minutes > 0 && total > 0) {
-      const part = el("div", "share-part");
-      part.style.width = `${(group.minutes / total) * 100}%`;
-      part.style.background = colors.get(group.project) ?? "#888";
-      part.title = `${group.project}: ${formatMinutes(group.minutes)} (${formatShare(group.minutes, total)})`;
-      bar.append(part);
-    }
-  }
-  section.append(bar, renderShareTree(projectTree(doc.entries), total, colors));
+  section.append(el("h2", null, "Share of tracked time"), ...shareBlocks(doc.entries, colors));
   return section;
-}
-
-function renderShareTree(nodes: ProjectNode[], total: number, colors: Map<string, string>): HTMLElement {
-  const list = el("ul", "share-tree");
-  const add = (node: ProjectNode) => {
-    const row = el("li", node.children.length ? "share-row parent" : "share-row");
-    const name = el("span", "share-name");
-    name.style.paddingLeft = `${node.depth * 18}px`;
-    name.append(dot(colors.get(node.path)), el("span", null, node.label));
-    row.append(
-      name,
-      el("span", "share-time muted", formatMinutes(node.minutes)),
-      el("span", "share-percent", formatShare(node.minutes, total)),
-    );
-    list.append(row);
-    for (const child of node.children) add(child);
-  };
-  nodes.forEach(add);
-  return list;
 }
 
 // The timeline: one lane per project, entries drawn as coloured blocks at their real times.
@@ -216,7 +181,7 @@ function render(doc: TimeEntryDay, fileName: string): void {
   view.replaceChildren(
     renderHeader(doc, fileName),
     renderStats(doc, groups),
-    renderShareBar(doc, groups, colors),
+    renderShareBar(doc, colors),
     renderTimeline(doc, groups, colors),
     renderGroups(groups, colors),
   );
@@ -429,6 +394,11 @@ export function mountViewer(root: HTMLElement, shell: Shell): Controller {
   }
 
   const pick = (file: File): void => {
+    const refusal = markdownPickMessage(file.name);
+    if (refusal) {
+      showError(refusal); // never read as JSON, and not counted as a loaded day
+      return;
+    }
     chosen = true;
     ticket += 1;
     load(file);

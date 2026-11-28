@@ -230,7 +230,9 @@ function parseTasks(text: string): Draft[] {
       headerSeen = true;
       return;
     }
+    if (line.startsWith("#")) return; // a comment, such as the "# Date, description, project" line of a new day
     if (HEADER_RE.test(line)) throw new TimeParseError(`line ${number}: only one day per input is supported`);
+    if (line.startsWith("# frozen:")) return; // the freeze mark (see freeze.ts): a comment, not an entry
     const match = TASK_RE.exec(line);
     if (!match) {
       throw new TimeParseError(`line ${number}: expected a task such as '- [ ] 859 watch tv', got '${line}'`);
@@ -347,6 +349,33 @@ function resolveReferences(drafts: Draft[], timeline: number[]): { descriptions:
     references.push({ start: formatMinutes24(timeline[target] % MINUTES_PER_DAY), line: drafts[target].line });
   });
   return { descriptions, references };
+}
+
+// The entries above a line, for a file that does not parse: the lines from the header to the line
+// before it, parsed on their own. The last of them is open, because its end is the start of the
+// line that failed. When those lines do not parse, as when a relative row above needs an absolute
+// time below the cut, the cut moves back to the line the new error names, and rows from there on
+// show "-". Returns no entries when nothing above the line parses.
+export function entriesBeforeLine(text: string, line: number, options: ParseOptions = {}): ParsedEntry[] {
+  const body = looksLikeHtml(text) ? htmlToMarkdown(text) : text;
+  const lines = body.split("\n");
+  let cut = Math.max(0, Math.min(line - 1, lines.length));
+  let entries: ParsedEntry[];
+  for (;;) {
+    try {
+      entries = parseDay(lines.slice(0, cut).join("\n"), options).entries;
+      break;
+    } catch (err) {
+      if (!(err instanceof TimeParseError)) throw err;
+      const named = /^line (\d+):/.exec(err.message);
+      const failed = named ? Number(named[1]) - 1 : -1;
+      if (failed < 0 || failed >= cut) return [];
+      cut = failed;
+    }
+  }
+  if (!entries.length) return [];
+  const last = entries[entries.length - 1];
+  return [...entries.slice(0, -1), { ...last, end: null, duration_minutes: null }];
 }
 
 export function parseDay(text: string, options: ParseOptions = {}): ParsedDay {

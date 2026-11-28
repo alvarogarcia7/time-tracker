@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { mondayOf, summarizeWeek, weekDates } from "../src/core/week";
+import { daysBetween, dayTotals, mondayOf, summarizeWeek, weekDates } from "../src/core/week";
 import { Entry, TimeEntryDay, formatShare, projectTree, tasksOf } from "../src/core/summary";
 
 const entry = (project: string, minutes: number | null, description = "x"): Entry => ({
@@ -133,4 +133,36 @@ test("an empty week has no days with entries", () => {
   const week = summarizeWeek([], "2026-11-09");
   assert.equal(week.minutes, 0);
   assert.equal(week.daysWithEntries, 0);
+});
+
+// ---- the days of a range, for the reports' duration by day -------------------------
+
+test("a range lists its days from the first to the last, both included", () => {
+  assert.deepEqual(daysBetween("2026-11-09", "2026-11-11"), ["2026-11-09", "2026-11-10", "2026-11-11"]);
+  assert.deepEqual(daysBetween("2026-11-30", "2026-11-30"), ["2026-11-30"]);
+  assert.deepEqual(daysBetween("2026-11-11", "2026-11-09"), []);
+});
+
+test("the day totals count the records of the listed days only", () => {
+  const days = dayTotals(
+    [
+      { day: "2026-11-09", project: "client-b", minutes: 480 },
+      { day: "2026-11-10", project: "client-b", minutes: 240 },
+      { day: "2026-11-10", project: "gym", minutes: 60 },
+      { day: "2026-11-11", project: "gym", minutes: null }, // open: counted, without minutes
+      { day: "2026-11-20", project: "gym", minutes: 999 }, // outside the range
+    ],
+    daysBetween("2026-11-09", "2026-11-11"),
+  );
+
+  assert.deepEqual(
+    days.map((day) => [day.date, day.minutes, day.entries]),
+    [
+      ["2026-11-09", 480, 1],
+      ["2026-11-10", 300, 2],
+      ["2026-11-11", 0, 1],
+    ],
+  );
+  assert.equal(days[1].byProject.get("gym"), 60);
+  assert.equal(days[2].byProject.size, 0);
 });

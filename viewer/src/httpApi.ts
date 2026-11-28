@@ -16,11 +16,14 @@ export function httpApi(): EditorApi {
     files: async () => (await call<{ files: DayFileInfo[] }>("GET", "/api/files")).files,
     read: (name) => call<DayFile>("GET", `/api/file?name=${encodeURIComponent(name)}`),
     write: (name, text, base) => call("PUT", `/api/file?name=${encodeURIComponent(name)}`, { text, base }),
+    delete: async (name, base) => {
+      await call("DELETE", `/api/file?name=${encodeURIComponent(name)}`, { base });
+    },
     create: (name, text) => call("POST", "/api/file", { name, text }),
     parse: (text) => call("POST", "/api/parse", { text }),
     projects: () => call<DatabaseFile>("GET", "/api/projects"),
     saveProjects: (text, base) => call("PUT", "/api/projects", { text, base }),
-    createProject: (name) => call("POST", "/api/projects", { name }),
+    createProject: (name, category) => call("POST", "/api/projects", { name, category }),
     vocabulary: async () => (await call<{ descriptions: string[] }>("GET", "/api/vocabulary")).descriptions,
     days: () => call("GET", "/api/days"),
   };
